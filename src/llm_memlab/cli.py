@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 from .estimates import TransformerConfig, estimate_transformer_memory, preset_config
 from .ir import GraphSpec, OperationSpec, TensorSpec
@@ -39,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
 
     trace_parser = subparsers.add_parser("trace-demo", help="Trace a tiny PyTorch model if torch is installed.")
     trace_parser.set_defaults(func=_trace_demo)
+
+    kernel_parser = subparsers.add_parser("kernel-demo", help="Run correctness checks and microbenchmarks for optimized kernels.")
+    kernel_parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    kernel_parser.add_argument("--compile", action="store_true", help="Use torch.compile where available.")
+    kernel_parser.add_argument("--repeats", type=int, default=20)
+    kernel_parser.set_defaults(func=_kernel_demo)
 
     args = parser.parse_args(argv)
     return args.func(args)
@@ -105,6 +112,76 @@ def _trace_demo(args: argparse.Namespace) -> int:
         _ = model(x)
     print(trace.to_text())
     return 0
+
+
+def _kernel_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run kernel-demo: pip install torch")
+        return 2
+
+    from .kernels import KernelConfig, chunked_cross_entropy, kernel
+    from .report import make_table
+
+    device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
+    if device == "auto":
+        device = "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        print("CUDA was requested but is not available.")
+        return 2
+    dtype = torch.float16 if device == "cuda" else torch.float32
+    cfg = KernelConfig(compile=args.compile)
+
+    rms = kernel("rms_norm", cfg)
+    sdpa = kernel("scaled_dot_product_attention", cfg)
+    swiglu_kernel = kernel("swiglu", cfg)
+
+    x = torch.randn(2, 128, 512, device=device, dtype=dtype)
+    weight = torch.randn(512, device=device, dtype=dtype)
+    gate = torch.randn(1536, 512, device=device, dtype=dtype)
+    up = torch.randn(1536, 512, device=device, dtype=dtype)
+    down = torch.randn(512, 1536, device=device, dtype=dtype)
+    q = torch.randn(2, 8, 128, 64, device=device, dtype=dtype)
+    k = torch.randn(2, 8, 128, 64, device=device, dtype=dtype)
+    v = torch.randn(2, 8, 128, 64, device=device, dtype=dtype)
+    logits = torch.randn(2, 128, 2048, device=device, dtype=dtype)
+    targets = torch.randint(0, 2048, (2, 128), device=device)
+
+    checks = []
+    checks.append(("rms_norm", tuple(rms(x, weight).shape)))
+    checks.append(("swiglu", tuple(swiglu_kernel(x, gate, up, down).shape)))
+    checks.append(("sdpa", tuple(sdpa(q, k, v, is_causal=True).shape)))
+    checks.append(("chunked_cross_entropy", tuple(chunked_cross_entropy(logits, targets, chunk_size=64).shape)))
+
+    rows = []
+    for name, fn in [
+        ("rms_norm", lambda: rms(x, weight)),
+        ("swiglu", lambda: swiglu_kernel(x, gate, up, down)),
+        ("sdpa", lambda: sdpa(q, k, v, is_causal=True)),
+        ("chunked_cross_entropy", lambda: chunked_cross_entropy(logits, targets, chunk_size=64)),
+    ]:
+        rows.append((name, f"{_bench(torch, fn, args.repeats):.3f} ms"))
+
+    print(f"device={device} dtype={dtype} compile={args.compile}")
+    print(make_table(("Kernel", "Output shape"), checks))
+    print("")
+    print(make_table(("Kernel", "Avg time"), rows))
+    return 0
+
+
+def _bench(torch, fn, repeats: int) -> float:
+    repeats = max(1, repeats)
+    for _ in range(2):
+        fn()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(repeats):
+        fn()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return (time.perf_counter() - start) * 1000 / repeats
 
 
 def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> GraphSpec:

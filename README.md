@@ -58,6 +58,41 @@ estimate = estimate_transformer_memory(cfg)
 print(estimate.to_text())
 ```
 
+
+## Optimized Kernels
+
+The kernel layer provides PyTorch-compatible building blocks for transformer hot paths:
+
+- `rms_norm` with fp32 variance and output dtype preservation.
+- `apply_rope` for interleaved rotary embeddings.
+- `swiglu` for gated MLP blocks.
+- `scaled_dot_product_attention`, dispatching to PyTorch SDPA and FlashAttention-style kernels where available.
+- `chunked_cross_entropy` to reduce loss-time memory spikes on long sequences.
+
+Run a local microbenchmark:
+
+```powershell
+python -m llm_memlab kernel-demo --device auto --repeats 20
+```
+
+Use the kernels directly:
+
+```python
+from llm_memlab.kernels import rms_norm, scaled_dot_product_attention
+
+y = rms_norm(x, weight)
+out = scaled_dot_product_attention(q, k, v, is_causal=True)
+```
+
+Use `torch.compile` when available:
+
+```python
+from llm_memlab.kernels import KernelConfig, kernel
+
+rms = kernel("rms_norm", KernelConfig(compile=True))
+y = rms(x, weight)
+```
+
 ## PyTorch Runtime Debugging
 
 ```python
@@ -88,3 +123,4 @@ CUDA allocator deltas when CUDA is available, and NaN/Inf flags.
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
