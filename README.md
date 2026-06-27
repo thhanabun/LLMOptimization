@@ -65,7 +65,7 @@ The kernel layer provides PyTorch-compatible building blocks for transformer hot
 
 - `rms_norm` with fp32 variance and output dtype preservation.
 - `rms_norm_manual_backward` for compact PyTorch autograd storage during training.
-- Optional `triton_rms_norm`, `triton_apply_rope`, `triton_swiglu_activation`, and int8 quantize/dequantize hooks with PyTorch fallback.
+- Optional `triton_rms_norm`, `triton_apply_rope`, `triton_swiglu_activation`, and real int8/uint8 per-token quantize/dequantize Triton kernels with PyTorch fallback.
 - `apply_rope` for interleaved rotary embeddings.
 - `swiglu` for gated MLP blocks.
 - `scaled_dot_product_attention`, dispatching to PyTorch SDPA and FlashAttention-style kernels where available.
@@ -472,6 +472,92 @@ python examples/hf_suite_example.py Qwen/Qwen2.5-0.5B
 ```
 
 The HF example expects the model to be cached locally.
+
+## Output Quality, Benchmark Store, and Runtime Backends
+
+Measure output drift beyond raw latency:
+
+```powershell
+python -m llm_memlab quality-demo
+```
+
+```python
+from llm_memlab import compare_logits, compare_token_sequences
+
+logit_quality = compare_logits(baseline_logits, candidate_logits, top_k=5)
+token_quality = compare_token_sequences(baseline_ids, candidate_ids)
+print(logit_quality.to_text())
+print(token_quality.to_text())
+```
+
+Persist benchmark results as JSON or CSV so multiple runs can be compared later:
+
+```powershell
+python -m llm_memlab suite-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --local-files-only --json-out suite.json --csv-out suite.csv
+python -m llm_memlab scoreboard-hf --models Qwen/Qwen2.5-0.5B --local-files-only --json-out scoreboard.json --csv-out scoreboard.csv
+```
+
+The backend registry reports runtime availability and priority for torch, CUDA, and Triton:
+
+```powershell
+python -m llm_memlab backend-demo
+```
+
+```python
+from llm_memlab import default_backend_registry
+
+registry = default_backend_registry()
+print(registry.best("triton", "cuda", "torch"))
+```
+
+## Interactive Debugger and OOM-Aware HF Runs
+
+The debugger can emit a sortable/filterable HTML table for layer-level inspection:
+
+```powershell
+python -m llm_memlab trace-demo --interactive-out trace_interactive.html
+python -m llm_memlab debug-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --interactive-out debug_interactive.html --local-files-only
+```
+
+`run-hf` now combines the memory policy, HF cache hints, conservative patching, and OOM fallback. If the policy cache path raises a CUDA OOM, it retries with cache disabled and reports the selected strategy:
+
+```powershell
+python -m llm_memlab run-hf --model Qwen/Qwen2.5-0.5B --tokens 32 --max-vram 8GB --local-files-only
+```
+
+From Python:
+
+```python
+from llm_memlab import OOMStrategy, plan_hf_cache, run_with_oom_fallback
+
+cache_plan = plan_hf_cache(policy, model)
+result = run_with_oom_fallback(
+    lambda **kw: model.generate(**encoded, **{**cache_plan.generation_kwargs(), **kw}),
+    [OOMStrategy("policy-cache", {}), OOMStrategy("no-cache", {"use_cache": False})],
+)
+```
+
+## Triton Quantization Kernels
+
+The Triton layer now includes real generic last-dimension CUDA kernels for per-token `int8` and asymmetric `uint8` quantize/dequantize. They accept tensors shaped like `[batch, heads, tokens, head_dim]` or any tensor where the last dimension is the vector to quantize. CPU, missing-Triton, and oversized hidden dimensions fall back to the PyTorch reference path.
+
+```python
+from llm_memlab import (
+    triton_dequantize_int8_per_token,
+    triton_dequantize_uint8_per_token,
+    triton_quantize_int8_per_token,
+    triton_quantize_uint8_per_token,
+)
+
+q8, scale = triton_quantize_int8_per_token(k)
+k_roundtrip = triton_dequantize_int8_per_token(q8, scale, dtype=k.dtype)
+
+qu8, scale, zero_point = triton_quantize_uint8_per_token(k)
+k_uint8 = triton_dequantize_uint8_per_token(qu8, scale, zero_point, dtype=k.dtype)
+```
+
+`quantized_kv_attention(..., backend="triton")` uses these Triton quant/dequant kernels when CUDA+Triton are available, then calls PyTorch SDPA. A fully fused quantized attention kernel is still the next major hot-path step.
+
 ## Roadmap
 
 1. Add model importers for Hugging Face transformer blocks.
@@ -479,17 +565,4 @@ The HF example expects the model to be cached locally.
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
-
-
-
-
-
-
-
-
-
-
-
-
-
 

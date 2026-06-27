@@ -173,17 +173,125 @@ def triton_quantize_int8_per_token(x, *, eps: float = 1e-6):
 
 
 def triton_dequantize_int8_per_token(q, scale, *, dtype=None):
-    """Dequantize int8 vectors.
+    """Dequantize int8 vectors with a generic Triton last-dim kernel on CUDA."""
 
-    The public hook mirrors `triton_quantize_int8_per_token`. Dequantization is
-    currently delegated to the vectorized PyTorch reference path because it is
-    bandwidth-bound and keeps CPU/GPU behavior identical while the cache-aware
-    attention kernels mature.
-    """
+    if not _can_use_triton(q):
+        from .kv_cache import dequantize_int8_per_token
 
-    from .kv_cache import dequantize_int8_per_token
+        return dequantize_int8_per_token(q, scale, dtype=dtype)
 
-    return dequantize_int8_per_token(q, scale, dtype=dtype)
+    torch = require_torch()
+    import triton
+    import triton.language as tl
+
+    original_shape = q.shape
+    dim = original_shape[-1]
+    q_flat = q.contiguous().view(-1, dim)
+    scale_flat = scale.contiguous().view(-1, 1)
+    out_dtype = dtype or torch.float16
+    out = torch.empty(q_flat.shape, device=q.device, dtype=out_dtype)
+    block = triton.next_power_of_2(dim)
+    if block > 131072:
+        from .kv_cache import dequantize_int8_per_token
+
+        return dequantize_int8_per_token(q, scale, dtype=dtype)
+
+    @triton.jit
+    def _kernel(Q, S, O, D: tl.constexpr, BLOCK: tl.constexpr):
+        row = tl.program_id(0)
+        offsets = tl.arange(0, BLOCK)
+        mask = offsets < D
+        qv = tl.load(Q + row * D + offsets, mask=mask, other=0).to(tl.float32)
+        sc = tl.load(S + row).to(tl.float32)
+        tl.store(O + row * D + offsets, qv * sc, mask=mask)
+
+    _kernel[(q_flat.shape[0],)](q_flat, scale_flat, out, dim, BLOCK=block)
+    return out.view(original_shape)
+
+
+def triton_quantize_uint8_per_token(x, *, eps: float = 1e-6):
+    """Asymmetric uint8 quantization with Triton on CUDA, otherwise PyTorch."""
+
+    if not _can_use_triton(x):
+        from .kv_cache import quantize_uint8_per_token
+
+        return quantize_uint8_per_token(x, eps=eps)
+
+    torch = require_torch()
+    import triton
+    import triton.language as tl
+
+    original_shape = x.shape
+    dim = original_shape[-1]
+    flat = x.contiguous().view(-1, dim)
+    q = torch.empty_like(flat, dtype=torch.uint8)
+    scales = torch.empty((flat.shape[0], 1), device=x.device, dtype=torch.float32)
+    zero_points = torch.empty((flat.shape[0], 1), device=x.device, dtype=torch.uint8)
+    block = triton.next_power_of_2(dim)
+    if block > 131072:
+        from .kv_cache import quantize_uint8_per_token
+
+        return quantize_uint8_per_token(x, eps=eps)
+
+    @triton.jit
+    def _kernel(X, Q, S, Z, D: tl.constexpr, EPS: tl.constexpr, BLOCK: tl.constexpr):
+        row = tl.program_id(0)
+        offsets = tl.arange(0, BLOCK)
+        mask = offsets < D
+        vals = tl.load(X + row * D + offsets, mask=mask, other=0.0).to(tl.float32)
+        min_vals = tl.load(X + row * D + offsets, mask=mask, other=3.4028234663852886e38).to(tl.float32)
+        max_vals = tl.load(X + row * D + offsets, mask=mask, other=-3.4028234663852886e38).to(tl.float32)
+        x_min = tl.min(min_vals, axis=0)
+        x_max = tl.max(max_vals, axis=0)
+        scale = tl.maximum(x_max - x_min, EPS) / 255.0
+        zp = tl.extra.libdevice.nearbyint(tl.maximum(tl.minimum(-x_min / scale, 255.0), 0.0))
+        q_vals = tl.extra.libdevice.nearbyint(vals / scale + zp)
+        q_vals = tl.maximum(tl.minimum(q_vals, 255.0), 0.0)
+        tl.store(Q + row * D + offsets, q_vals, mask=mask)
+        tl.store(S + row, scale)
+        tl.store(Z + row, zp)
+
+    _kernel[(flat.shape[0],)](flat, q, scales, zero_points, dim, eps, BLOCK=block)
+    return q.view(original_shape), scales.view(*original_shape[:-1], 1), zero_points.view(*original_shape[:-1], 1)
+
+
+def triton_dequantize_uint8_per_token(q, scale, zero_point, *, dtype=None):
+    """Dequantize uint8 vectors with a generic Triton last-dim kernel on CUDA."""
+
+    if not _can_use_triton(q):
+        from .kv_cache import dequantize_uint8_per_token
+
+        return dequantize_uint8_per_token(q, scale, zero_point, dtype=dtype)
+
+    torch = require_torch()
+    import triton
+    import triton.language as tl
+
+    original_shape = q.shape
+    dim = original_shape[-1]
+    q_flat = q.contiguous().view(-1, dim)
+    scale_flat = scale.contiguous().view(-1, 1)
+    zp_flat = zero_point.contiguous().view(-1, 1)
+    out_dtype = dtype or torch.float16
+    out = torch.empty(q_flat.shape, device=q.device, dtype=out_dtype)
+    block = triton.next_power_of_2(dim)
+    if block > 131072:
+        from .kv_cache import dequantize_uint8_per_token
+
+        return dequantize_uint8_per_token(q, scale, zero_point, dtype=dtype)
+
+    @triton.jit
+    def _kernel(Q, S, Z, O, D: tl.constexpr, BLOCK: tl.constexpr):
+        row = tl.program_id(0)
+        offsets = tl.arange(0, BLOCK)
+        mask = offsets < D
+        qv = tl.load(Q + row * D + offsets, mask=mask, other=0).to(tl.float32)
+        sc = tl.load(S + row).to(tl.float32)
+        zp = tl.load(Z + row).to(tl.float32)
+        tl.store(O + row * D + offsets, (qv - zp) * sc, mask=mask)
+
+    _kernel[(q_flat.shape[0],)](q_flat, scale_flat, zp_flat, out, dim, BLOCK=block)
+    return out.view(original_shape)
 
 
 def _prepare_rope_cache(cos, sin, target):

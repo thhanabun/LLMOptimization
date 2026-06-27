@@ -25,7 +25,7 @@ def select_quantized_attention_backend(q, k, *, requested: str = "auto", quant_d
             from .triton_kernels import triton_available
 
             if triton_available():
-                return QuantizedAttentionDispatch(requested, "triton", "triton-ready-fallback", quant_dtype, "fused kernel placeholder uses fallback today")
+                return QuantizedAttentionDispatch(requested, "triton", "triton-quant-dequant+sdpa", quant_dtype, "using Triton quant/dequant kernels before SDPA")
         except Exception as exc:
             if requested == "triton":
                 raise
@@ -90,6 +90,8 @@ def _registry() -> dict[str, Callable[..., Any]]:
         "triton_swiglu_activation": triton_swiglu_activation,
         "triton_quantize_int8_per_token": triton_quantize_int8_per_token,
         "triton_dequantize_int8_per_token": triton_dequantize_int8_per_token,
+        "triton_quantize_uint8_per_token": triton_quantize_uint8_per_token,
+        "triton_dequantize_uint8_per_token": triton_dequantize_uint8_per_token,
         "scaled_dot_product_attention": scaled_dot_product_attention,
         "quantized_kv_attention": quantized_kv_attention,
         "chunked_cross_entropy": chunked_cross_entropy,
@@ -208,6 +210,18 @@ def triton_dequantize_int8_per_token(q, scale, *, dtype=None):
     return _triton_dequantize_int8_per_token(q, scale, dtype=dtype)
 
 
+
+def triton_quantize_uint8_per_token(x, *, eps: float = 1e-6):
+    from .triton_kernels import triton_quantize_uint8_per_token as _triton_quantize_uint8_per_token
+
+    return _triton_quantize_uint8_per_token(x, eps=eps)
+
+
+def triton_dequantize_uint8_per_token(q, scale, zero_point, *, dtype=None):
+    from .triton_kernels import triton_dequantize_uint8_per_token as _triton_dequantize_uint8_per_token
+
+    return _triton_dequantize_uint8_per_token(q, scale, zero_point, dtype=dtype)
+
 def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None):
     """Dispatch to PyTorch SDPA, which can use FlashAttention-style kernels on supported GPUs."""
 
@@ -232,11 +246,22 @@ def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None
     branch without changing callers.
     """
 
-    _dispatch = select_quantized_attention_backend(q, k, requested=backend, quant_dtype=quant_dtype)
-    from .kv_quality import _roundtrip
+    dispatch = select_quantized_attention_backend(q, k, requested=backend, quant_dtype=quant_dtype)
+    if dispatch.selected_backend == "triton" and quant_dtype == "int8":
+        qk, ks = triton_quantize_int8_per_token(k, eps=eps)
+        qv, vs = triton_quantize_int8_per_token(v, eps=eps)
+        k_dequant = triton_dequantize_int8_per_token(qk, ks, dtype=k.dtype)
+        v_dequant = triton_dequantize_int8_per_token(qv, vs, dtype=v.dtype)
+    elif dispatch.selected_backend == "triton" and quant_dtype == "uint8":
+        qk, ks, kz = triton_quantize_uint8_per_token(k, eps=eps)
+        qv, vs, vz = triton_quantize_uint8_per_token(v, eps=eps)
+        k_dequant = triton_dequantize_uint8_per_token(qk, ks, kz, dtype=k.dtype)
+        v_dequant = triton_dequantize_uint8_per_token(qv, vs, vz, dtype=v.dtype)
+    else:
+        from .kv_quality import _roundtrip
 
-    k_dequant = _roundtrip(k, quant_dtype=quant_dtype, eps=eps)
-    v_dequant = _roundtrip(v, quant_dtype=quant_dtype, eps=eps)
+        k_dequant = _roundtrip(k, quant_dtype=quant_dtype, eps=eps)
+        v_dequant = _roundtrip(v, quant_dtype=quant_dtype, eps=eps)
     return scaled_dot_product_attention(
         q,
         k_dequant,
@@ -391,7 +416,4 @@ def _expand_rope_cache(cache, target):
     while cache.dim() < target.dim():
         cache = cache.unsqueeze(0)
     return cache.to(device=target.device, dtype=target.dtype)
-
-
-
 

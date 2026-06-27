@@ -1,13 +1,16 @@
 """Memory-first LLM analysis toolkit."""
 
 from .attention_debugger import AttentionStats, analyze_qk_attention, attention_stats_to_text, collect_attention_stats
+from .backend_registry import BackendInfo, BackendRegistry, default_backend_registry
 from .benchmark import BenchmarkConfig, BenchmarkResult, benchmark_callable, benchmark_decode, benchmark_forward, compare_benchmarks
+from .benchmark_store import BenchmarkRecord, read_benchmark_json, record_from_benchmark, records_from_suite, write_benchmark_csv, write_benchmark_json
 from .benchmark_suite import InferenceSuiteResult, benchmark_inference_suite, compare_inference_suites
 from .bytes import dtype_size_bytes, format_bytes, parse_bytes
 from .compare_report import CompareReport, compare_report_to_html, scoreboard_to_html, write_compare_html, write_scoreboard_html
 from .drift_debugger import DriftReport, LayerDriftRecord, compare_layer_drift
 from .estimates import MemoryEstimate, TransformerConfig, estimate_transformer_memory, preset_config
-from .html_report import trace_timeline_to_html, trace_to_html, write_timeline_html, write_trace_html
+from .hf_cache import HFCachePlan, plan_hf_cache
+from .html_report import trace_interactive_to_html, trace_timeline_to_html, trace_to_html, write_interactive_html, write_timeline_html, write_trace_html
 from .inspector import ModelArchitectureInfo, inspect_model, load_hf_model
 from .ir import GraphSpec, OperationSpec, TensorSpec
 from .kernels import (
@@ -27,7 +30,9 @@ from .kernels import (
     swiglu,
     triton_apply_rope,
     triton_dequantize_int8_per_token,
+    triton_dequantize_uint8_per_token,
     triton_quantize_int8_per_token,
+    triton_quantize_uint8_per_token,
     triton_rms_norm,
     triton_swiglu_activation,
 )
@@ -48,32 +53,41 @@ from .kv_cache import (
 )
 from .kv_quality import AttentionKVQualityResult, KVQualityResult, evaluate_attention_kv_quality, evaluate_int8_kv_quality, evaluate_kv_quantization_quality
 from .memory_policy import MemoryPolicy, choose_memory_policy
+from .oom_runner import OOMRunResult, OOMStrategy, default_generation_strategies, is_oom_error, run_with_oom_fallback
 from .optimization_report import OptimizationFinding, OptimizationReport, infer_findings
 from .patchers import PackedQKVAttentionAdapter, PatchReport, optimize_hf_model, optimize_llama_qwen_attention
 from .planner import BufferPlan, MemoryPlanner, TensorLifetime
+from .quality_metrics import LogitQualityResult, TokenQualityResult, compare_logits, compare_token_sequences
 from .torch_debugger import TorchTrace, trace_forward
 from .triton_kernels import triton_available
 
 __all__ = [
     "AttentionKVQualityResult",
     "AttentionStats",
+    "BackendInfo",
+    "BackendRegistry",
     "BenchmarkConfig",
-    "DriftReport",
-    "InferenceSuiteResult",
+    "BenchmarkRecord",
     "BenchmarkResult",
     "BufferPlan",
     "CompareReport",
     "DecodeConfig",
     "DecodeResult",
+    "DriftReport",
     "GraphSpec",
+    "HFCachePlan",
+    "InferenceSuiteResult",
     "KVCacheConfig",
     "KVQualityResult",
     "KernelConfig",
     "LayerDriftRecord",
+    "LogitQualityResult",
     "MemoryEstimate",
     "MemoryPlanner",
     "MemoryPolicy",
     "ModelArchitectureInfo",
+    "OOMRunResult",
+    "OOMStrategy",
     "OperationSpec",
     "OptimizationFinding",
     "OptimizationReport",
@@ -85,6 +99,7 @@ __all__ = [
     "StaticKVCache",
     "TensorLifetime",
     "TensorSpec",
+    "TokenQualityResult",
     "TorchTrace",
     "TransformerConfig",
     "analyze_qk_attention",
@@ -92,15 +107,19 @@ __all__ = [
     "attention_stats_to_text",
     "benchmark_callable",
     "benchmark_decode",
-    "benchmark_inference_suite",
     "benchmark_forward",
+    "benchmark_inference_suite",
     "choose_memory_policy",
     "chunked_cross_entropy",
     "collect_attention_stats",
     "compare_benchmarks",
     "compare_inference_suites",
     "compare_layer_drift",
+    "compare_logits",
     "compare_report_to_html",
+    "compare_token_sequences",
+    "default_backend_registry",
+    "default_generation_strategies",
     "dequantize_int8_per_token",
     "dequantize_uint8_per_token",
     "dtype_size_bytes",
@@ -112,39 +131,49 @@ __all__ = [
     "greedy_decode",
     "infer_findings",
     "inspect_model",
+    "is_oom_error",
     "kernel",
     "linear_cross_entropy",
     "load_hf_model",
     "optimize_hf_model",
     "optimize_llama_qwen_attention",
     "parse_bytes",
+    "plan_hf_cache",
     "preset_config",
     "qkv_rope_attention",
     "qkv_rope_attention_cached",
     "quantize_int8_per_token",
     "quantize_uint8_per_token",
     "quantized_kv_attention",
-    "select_quantized_attention_backend",
+    "read_benchmark_json",
+    "record_from_benchmark",
+    "records_from_suite",
     "resolve_kv_storage_dtype",
     "rms_norm",
     "rms_norm_manual_backward",
+    "run_with_oom_fallback",
     "sample_next_token",
-    "scoreboard_to_html",
-    "trace_timeline_to_html",
-    "write_scoreboard_html",
-    "write_timeline_html",
     "scaled_dot_product_attention",
+    "scoreboard_to_html",
+    "select_quantized_attention_backend",
     "swiglu",
     "trace_forward",
+    "trace_interactive_to_html",
+    "trace_timeline_to_html",
     "trace_to_html",
     "triton_apply_rope",
     "triton_available",
     "triton_dequantize_int8_per_token",
+    "triton_dequantize_uint8_per_token",
     "triton_quantize_int8_per_token",
+    "triton_quantize_uint8_per_token",
     "triton_rms_norm",
     "triton_swiglu_activation",
+    "write_benchmark_csv",
+    "write_benchmark_json",
     "write_compare_html",
+    "write_interactive_html",
+    "write_scoreboard_html",
+    "write_timeline_html",
     "write_trace_html",
 ]
-
-

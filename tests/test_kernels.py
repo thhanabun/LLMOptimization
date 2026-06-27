@@ -24,7 +24,9 @@ from llm_memlab.kernels import (
     triton_apply_rope,
     triton_rms_norm,
     triton_dequantize_int8_per_token,
+    triton_dequantize_uint8_per_token,
     triton_quantize_int8_per_token,
+    triton_quantize_uint8_per_token,
     triton_swiglu_activation,
 )
 from llm_memlab.kv_cache import KVCacheConfig, StaticKVCache
@@ -107,6 +109,20 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(q.dtype, torch.int8)
         self.assertLess((x - y).abs().mean().item(), 0.02)
 
+
+    def test_triton_uint8_quantize_dequantize_falls_back_on_cpu(self):
+        x = torch.randn(2, 3, 4, 8)
+        q, scale, zero_point = triton_quantize_uint8_per_token(x)
+        y = triton_dequantize_uint8_per_token(q, scale, zero_point, dtype=torch.float32)
+        self.assertEqual(q.dtype, torch.uint8)
+        self.assertLess((x - y).abs().mean().item(), 0.02)
+
+    def test_quantized_kv_attention_uint8_preserves_shape(self):
+        q = torch.randn(1, 2, 1, 8)
+        k = torch.randn(1, 2, 4, 8)
+        v = torch.randn(1, 2, 4, 8)
+        out = quantized_kv_attention(q, k, v, quant_dtype="uint8", backend="auto")
+        self.assertEqual(out.shape, q.shape)
     def test_chunked_cross_entropy_matches_reference(self):
         logits = torch.randn(2, 5, 11)
         targets = torch.randint(0, 11, (2, 5))
@@ -184,7 +200,4 @@ class KernelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
 

@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     trace_parser.add_argument("--all-modules", action="store_true", help="Record container modules as well as leaf modules.")
     trace_parser.add_argument("--html-out", help="Write an interactive-ish HTML layer report to this path.")
     trace_parser.add_argument("--timeline-out", help="Write a timeline-style HTML report to this path.")
+    trace_parser.add_argument("--interactive-out", help="Write an interactive sortable/filterable HTML report.")
     trace_parser.set_defaults(func=_trace_demo)
 
     kernel_parser = subparsers.add_parser("kernel-demo", help="Run correctness checks and microbenchmarks for optimized kernels.")
@@ -88,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     debug_hf_parser.add_argument("--dtype", default="auto")
     debug_hf_parser.add_argument("--html-out")
     debug_hf_parser.add_argument("--timeline-out")
+    debug_hf_parser.add_argument("--interactive-out")
     debug_hf_parser.add_argument("--local-files-only", action="store_true")
     debug_hf_parser.set_defaults(func=_debug_hf)
 
@@ -112,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     suite_hf_parser.add_argument("--device")
     suite_hf_parser.add_argument("--dtype", default="auto")
     suite_hf_parser.add_argument("--local-files-only", action="store_true")
+    suite_hf_parser.add_argument("--json-out")
+    suite_hf_parser.add_argument("--csv-out")
     suite_hf_parser.set_defaults(func=_suite_hf)
 
     drift_demo_parser = subparsers.add_parser("drift-demo", help="Compare layer-by-layer drift on two tiny local models.")
@@ -132,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     scoreboard_hf_parser.add_argument("--device")
     scoreboard_hf_parser.add_argument("--dtype", default="auto")
     scoreboard_hf_parser.add_argument("--local-files-only", action="store_true")
+    scoreboard_hf_parser.add_argument("--json-out")
+    scoreboard_hf_parser.add_argument("--csv-out")
     scoreboard_hf_parser.set_defaults(func=_scoreboard_hf)
 
     run_hf_parser = subparsers.add_parser("run-hf", help="Run HF generation with a memory-first policy report.")
@@ -171,10 +177,40 @@ def main(argv: list[str] | None = None) -> int:
     kv_quality_parser.add_argument("--dtype", default="int8", help="int8, uint8, fp16, bf16, fp32, fp8_e4m3fn")
     kv_quality_parser.add_argument("--attention", action="store_true", help="Compare SDPA output with quantized/dequantized K/V.")
     kv_quality_parser.set_defaults(func=_kv_quality_demo)
+    quality_parser = subparsers.add_parser("quality-demo", help="Compare logits and token outputs with quality metrics.")
+    quality_parser.add_argument("--top-k", type=int, default=5)
+    quality_parser.set_defaults(func=_quality_demo)
+
+    backend_parser = subparsers.add_parser("backend-demo", help="Show available runtime backends and priorities.")
+    backend_parser.set_defaults(func=_backend_demo)
 
     args = parser.parse_args(argv)
     return args.func(args)
 
+
+
+def _quality_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run quality-demo: pip install torch")
+        return 2
+
+    from .quality_metrics import compare_logits, compare_token_sequences
+
+    baseline = torch.randn(2, 4, 16)
+    candidate = baseline + torch.randn_like(baseline) * 0.001
+    print(compare_logits(baseline, candidate, top_k=args.top_k).to_text())
+    print("")
+    print(compare_token_sequences(torch.tensor([1, 2, 3, 4]), torch.tensor([1, 2, 5, 4])).to_text())
+    return 0
+
+
+def _backend_demo(args: argparse.Namespace) -> int:
+    from .backend_registry import default_backend_registry
+
+    print(default_backend_registry().to_text())
+    return 0
 
 def _estimate(args: argparse.Namespace) -> int:
     if all(value is not None for value in (args.layers, args.hidden, args.intermediate, args.heads, args.vocab)):
@@ -246,7 +282,11 @@ def _trace_demo(args: argparse.Namespace) -> int:
 
         path = write_timeline_html(trace, args.timeline_out, title="llm-memlab trace timeline")
         print(f"Timeline report written to {path}")
-    return 0
+    if args.interactive_out:
+        from .html_report import write_interactive_html
+
+        path = write_interactive_html(trace, args.interactive_out, title="llm-memlab interactive trace")
+        print(f"Interactive report written to {path}")
     return 0
 
 
@@ -585,6 +625,11 @@ def _debug_hf(args: argparse.Namespace) -> int:
 
         path = write_timeline_html(trace, args.timeline_out, title=f"llm-memlab timeline: {args.model}")
         print(f"Timeline report written to {path}")
+    if args.interactive_out:
+        from .html_report import write_interactive_html
+
+        path = write_interactive_html(trace, args.interactive_out, title=f"llm-memlab interactive: {args.model}")
+        print(f"Interactive report written to {path}")
     return 0
 
 
@@ -688,6 +733,14 @@ def _suite_hf(args: argparse.Namespace) -> int:
     if args.device:
         encoded = {key: value.to(args.device) for key, value in encoded.items()}
     result = benchmark_inference_suite(model, encoded, model_name=args.model, max_new_tokens=args.tokens, config=BenchmarkConfig(warmup=1, repeats=args.repeats))
+    if args.json_out or args.csv_out:
+        from .benchmark_store import records_from_suite, write_benchmark_csv, write_benchmark_json
+
+        records = records_from_suite(result)
+        if args.json_out:
+            print(f"Benchmark JSON written to {write_benchmark_json(records, args.json_out)}")
+        if args.csv_out:
+            print(f"Benchmark CSV written to {write_benchmark_csv(records, args.csv_out)}")
     print(result.to_text())
     return 0
 
@@ -781,6 +834,24 @@ def _scoreboard_hf(args: argparse.Namespace) -> int:
         (row.get("model"), row.get("status"), _fmt_float(row.get("baseline_ms")), _fmt_float(row.get("optimized_ms")), _fmt_speed(row.get("speedup")), row.get("patched", ""))
         for row in rows
     ]))
+    if args.json_out or args.csv_out:
+        from .benchmark_store import BenchmarkRecord, write_benchmark_csv, write_benchmark_json
+
+        records = [
+            BenchmarkRecord(
+                name=str(row.get("model")),
+                kind="scoreboard",
+                mean_ms=float(row.get("optimized_ms") or 0.0),
+                min_ms=float(row.get("optimized_ms") or 0.0),
+                max_ms=float(row.get("optimized_ms") or 0.0),
+                extra=row,
+            )
+            for row in rows
+        ]
+        if args.json_out:
+            print(f"Scoreboard JSON written to {write_benchmark_json(records, args.json_out)}")
+        if args.csv_out:
+            print(f"Scoreboard CSV written to {write_benchmark_csv(records, args.csv_out)}")
     path = write_scoreboard_html(rows, args.out, title="llm-memlab HF scoreboard")
     print(f"Scoreboard HTML written to {path}")
     return 0
@@ -794,8 +865,10 @@ def _run_hf(args: argparse.Namespace) -> int:
         print("run-hf requires: pip install torch transformers")
         return 2
 
+    from .hf_cache import plan_hf_cache
     from .inspector import inspect_model, load_hf_model
     from .memory_policy import choose_memory_policy
+    from .oom_runner import OOMStrategy, run_with_oom_fallback
     from .patchers import optimize_hf_model
 
     try:
@@ -806,13 +879,30 @@ def _run_hf(args: argparse.Namespace) -> int:
         return 2
     info = inspect_model(model)
     policy = choose_memory_policy(max_vram=args.max_vram, model_info=info, sequence_length=len(tokenizer(args.prompt).input_ids))
+    cache_plan = plan_hf_cache(policy, model)
     optimize_hf_model(model)
     encoded = tokenizer(args.prompt, return_tensors="pt")
     if args.device:
         encoded = {key: value.to(args.device) for key, value in encoded.items()}
-    with torch.no_grad():
-        output_ids = model.generate(**encoded, max_new_tokens=args.tokens, do_sample=False)
+
+    def generate_with_kwargs(**extra_kwargs):
+        kwargs = cache_plan.generation_kwargs()
+        kwargs.update(extra_kwargs)
+        try:
+            with torch.no_grad():
+                return model.generate(**encoded, max_new_tokens=args.tokens, do_sample=False, **kwargs)
+        except TypeError:
+            kwargs.pop("cache_implementation", None)
+            with torch.no_grad():
+                return model.generate(**encoded, max_new_tokens=args.tokens, do_sample=False, **kwargs)
+
+    result = run_with_oom_fallback(generate_with_kwargs, [OOMStrategy("policy-cache", {}), OOMStrategy("no-cache", {"use_cache": False})])
+    output_ids = result.value
     print(policy.to_text())
+    print("")
+    print(cache_plan.to_text())
+    print("")
+    print(result.to_text())
     print("")
     print(tokenizer.decode(output_ids[0], skip_special_tokens=True))
     return 0
@@ -971,19 +1061,4 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

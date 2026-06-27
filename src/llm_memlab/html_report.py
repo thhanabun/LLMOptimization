@@ -150,3 +150,80 @@ def write_timeline_html(trace: Any, path: str | Path, *, title: str = "llm-memla
     output = Path(path)
     output.write_text(trace_timeline_to_html(trace, title=title), encoding="utf-8")
     return output
+
+
+def trace_interactive_to_html(trace: Any, *, title: str = "llm-memlab interactive trace") -> str:
+    records = list(getattr(trace, "records", []))
+    rows = []
+    for record in records:
+        rows.append(
+            f"<tr data-name='{_e(record.name).lower()}' data-type='{_e(record.type_name).lower()}'>"
+            f"<td><code>{_e(record.name)}</code></td>"
+            f"<td>{_e(record.type_name)}</td>"
+            f"<td data-num='{record.elapsed_ms:.8f}'>{record.elapsed_ms:.3f}</td>"
+            f"<td data-num='{record.output_bytes}'>{format_bytes(record.output_bytes)}</td>"
+            f"<td data-num='{record.parameter_bytes}'>{format_bytes(record.parameter_bytes)}</td>"
+            f"<td><code>{_e(record.input_shapes)}</code></td>"
+            f"<td><code>{_e(record.output_shapes)}</code></td>"
+            f"<td>{_e(_stats_text(getattr(record, 'output_stats', None)))}</td>"
+            f"<td>{'NaN' if record.has_nan else ''} {'Inf' if record.has_inf else ''}</td>"
+            "</tr>"
+        )
+    return f"""<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<title>{_e(title)}</title>
+<style>
+body {{ font-family: Segoe UI, Arial, sans-serif; margin:24px; color:#17202a; }}
+.toolbar {{ display:flex; gap:8px; flex-wrap:wrap; margin:16px 0; }}
+input, button {{ padding:8px 10px; border:1px solid #cfd8e3; border-radius:6px; background:white; }}
+table {{ border-collapse:collapse; width:100%; font-size:13px; }}
+th, td {{ border-bottom:1px solid #e5e9f0; padding:8px; text-align:left; vertical-align:top; }}
+th {{ background:#f6f8fb; cursor:pointer; position:sticky; top:0; }}
+code {{ white-space:pre-wrap; }}
+.metric {{ display:inline-block; border:1px solid #d8dee9; border-radius:8px; padding:10px 12px; margin-right:8px; }}
+</style>
+</head>
+<body>
+<h1>{_e(title)}</h1>
+<div class='metric'>Total: <b>{getattr(trace, 'total_ms', 0.0):.3f} ms</b></div>
+<div class='metric'>Layers: <b>{len(records)}</b></div>
+<div class='metric'>Output: <b>{format_bytes(sum(r.output_bytes for r in records))}</b></div>
+<div class='toolbar'>
+  <input id='filter' placeholder='Filter layer/type...' oninput='filterRows()'>
+  <button onclick='sortTable(2, true)'>Sort slowest</button>
+  <button onclick='sortTable(3, true)'>Sort largest output</button>
+  <button onclick='resetFilter()'>Reset</button>
+</div>
+<table id='layers'>
+<thead><tr><th onclick='sortTable(0,false)'>Module</th><th onclick='sortTable(1,false)'>Type</th><th onclick='sortTable(2,true)'>ms</th><th onclick='sortTable(3,true)'>Output</th><th onclick='sortTable(4,true)'>Params</th><th>Input</th><th>Output shape</th><th>Stats</th><th>Flags</th></tr></thead>
+<tbody>{''.join(rows)}</tbody>
+</table>
+<script>
+function filterRows() {{
+  const q = document.getElementById('filter').value.toLowerCase();
+  document.querySelectorAll('#layers tbody tr').forEach(row => {{
+    row.style.display = (row.dataset.name.includes(q) || row.dataset.type.includes(q)) ? '' : 'none';
+  }});
+}}
+function resetFilter() {{ document.getElementById('filter').value=''; filterRows(); }}
+function sortTable(col, numeric) {{
+  const tbody = document.querySelector('#layers tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a,b) => {{
+    const av = numeric ? parseFloat(a.children[col].dataset.num || '0') : a.children[col].innerText;
+    const bv = numeric ? parseFloat(b.children[col].dataset.num || '0') : b.children[col].innerText;
+    return numeric ? bv - av : String(av).localeCompare(String(bv));
+  }});
+  rows.forEach(row => tbody.appendChild(row));
+}}
+</script>
+</body>
+</html>"""
+
+
+def write_interactive_html(trace: Any, path: str | Path, *, title: str = "llm-memlab interactive trace") -> Path:
+    output = Path(path)
+    output.write_text(trace_interactive_to_html(trace, title=title), encoding="utf-8")
+    return output
