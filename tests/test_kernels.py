@@ -14,11 +14,16 @@ from llm_memlab.kernels import (
     chunked_cross_entropy,
     linear_cross_entropy,
     qkv_rope_attention,
+    qkv_rope_attention_cached,
     rms_norm,
     rms_norm_manual_backward,
     scaled_dot_product_attention,
     swiglu,
+    triton_apply_rope,
+    triton_rms_norm,
+    triton_swiglu_activation,
 )
+from llm_memlab.kv_cache import KVCacheConfig, StaticKVCache
 
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
@@ -28,6 +33,13 @@ class KernelTests(unittest.TestCase):
         weight = torch.randn(8)
         actual = rms_norm(x, weight, eps=1e-5)
         expected = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5) * weight
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6))
+
+    def test_triton_rms_norm_falls_back_on_cpu(self):
+        x = torch.randn(2, 3, 8)
+        weight = torch.randn(8)
+        actual = triton_rms_norm(x, weight, eps=1e-5)
+        expected = rms_norm(x, weight, eps=1e-5)
         self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6))
 
     def test_manual_rms_norm_backward_matches_reference(self):
@@ -56,6 +68,16 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(q_out.shape, q.shape)
         self.assertEqual(k_out.shape, k.shape)
 
+    def test_triton_rope_falls_back_on_cpu(self):
+        q = torch.randn(2, 4, 6, 8)
+        k = torch.randn(2, 4, 6, 8)
+        cos = torch.randn(6, 4)
+        sin = torch.randn(6, 4)
+        actual_q, actual_k = triton_apply_rope(q, k, cos, sin)
+        expected_q, expected_k = apply_rope(q, k, cos, sin)
+        self.assertTrue(torch.allclose(actual_q, expected_q))
+        self.assertTrue(torch.allclose(actual_k, expected_k))
+
     def test_swiglu_matches_reference(self):
         x = torch.randn(2, 3, 8)
         gate = torch.randn(16, 8)
@@ -65,6 +87,13 @@ class KernelTests(unittest.TestCase):
         expected = torch.nn.functional.linear(
             torch.nn.functional.silu(torch.nn.functional.linear(x, gate)) * torch.nn.functional.linear(x, up), down
         )
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6))
+
+    def test_triton_swiglu_activation_falls_back_on_cpu(self):
+        gate = torch.randn(2, 3, 8)
+        up = torch.randn(2, 3, 8)
+        actual = triton_swiglu_activation(gate, up)
+        expected = torch.nn.functional.silu(gate) * up
         self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6))
 
     def test_chunked_cross_entropy_matches_reference(self):
@@ -102,6 +131,19 @@ class KernelTests(unittest.TestCase):
         sin = torch.randn(6, 8)
         y = qkv_rope_attention(x, qkv, out, cos=cos, sin=sin, num_heads=2)
         self.assertEqual(y.shape, x.shape)
+
+    def test_qkv_rope_attention_cached_updates_cache(self):
+        cache = StaticKVCache(KVCacheConfig(num_layers=1, batch_size=2, num_heads=2, head_dim=8, max_seq_len=8, dtype=torch.float32))
+        qkv = torch.randn(48, 16)
+        out = torch.randn(16, 16)
+        x0 = torch.randn(2, 1, 16)
+        y0 = qkv_rope_attention_cached(x0, qkv, out, kv_cache=cache, layer_idx=0, cache_position=0, num_heads=2)
+        self.assertEqual(y0.shape, x0.shape)
+        self.assertEqual(cache.length, 1)
+        x1 = torch.randn(2, 1, 16)
+        y1 = qkv_rope_attention_cached(x1, qkv, out, kv_cache=cache, layer_idx=0, cache_position=1, num_heads=2)
+        self.assertEqual(y1.shape, x1.shape)
+        self.assertEqual(cache.length, 2)
 
     def test_sdpa_preserves_shape(self):
         q = torch.randn(2, 4, 8, 16)

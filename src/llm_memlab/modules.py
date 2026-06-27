@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import math
-
-from .kernels import qkv_rope_attention, require_torch, rms_norm_manual_backward, swiglu
+from .kernels import qkv_rope_attention, qkv_rope_attention_cached, require_torch, rms_norm_manual_backward, swiglu
 
 
 def _torch_nn():
@@ -27,12 +25,13 @@ class OptimizedRMSNorm(_torch_nn()[1].Module):
 class OptimizedSwiGLUMLP(_torch_nn()[1].Module):
     """SwiGLU MLP block with separate gate/up/down projections."""
 
-    def __init__(self, hidden_size: int, intermediate_size: int, bias: bool = False):
+    def __init__(self, hidden_size: int, intermediate_size: int, bias: bool = False, use_triton: bool = False):
         torch, nn = _torch_nn()
         super().__init__()
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
+        self.use_triton = use_triton
 
     def forward(self, x):
         return swiglu(
@@ -43,13 +42,14 @@ class OptimizedSwiGLUMLP(_torch_nn()[1].Module):
             self.gate_proj.bias,
             self.up_proj.bias,
             self.down_proj.bias,
+            use_triton=self.use_triton,
         )
 
 
 class OptimizedSelfAttention(_torch_nn()[1].Module):
-    """Self-attention block using qkv packing, optional RoPE, and PyTorch SDPA."""
+    """Self-attention block using qkv packing, optional RoPE, SDPA, and optional StaticKVCache."""
 
-    def __init__(self, hidden_size: int, num_heads: int, bias: bool = False, dropout_p: float = 0.0):
+    def __init__(self, hidden_size: int, num_heads: int, bias: bool = False, dropout_p: float = 0.0, layer_idx: int | None = None):
         torch, nn = _torch_nn()
         super().__init__()
         if hidden_size % num_heads != 0:
@@ -57,10 +57,29 @@ class OptimizedSelfAttention(_torch_nn()[1].Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.dropout_p = dropout_p
+        self.layer_idx = layer_idx
         self.qkv_proj = nn.Linear(hidden_size, hidden_size * 3, bias=bias)
         self.out_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
 
-    def forward(self, x, cos=None, sin=None, *, is_causal: bool = True):
+    def forward(self, x, cos=None, sin=None, *, is_causal: bool = True, kv_cache=None, layer_idx: int | None = None, cache_position: int | None = None):
+        effective_layer_idx = self.layer_idx if layer_idx is None else layer_idx
+        if kv_cache is not None:
+            if effective_layer_idx is None:
+                raise ValueError("layer_idx is required when kv_cache is provided")
+            return qkv_rope_attention_cached(
+                x,
+                self.qkv_proj.weight,
+                self.out_proj.weight,
+                kv_cache=kv_cache,
+                layer_idx=effective_layer_idx,
+                cache_position=cache_position,
+                cos=cos,
+                sin=sin,
+                qkv_bias=self.qkv_proj.bias,
+                out_bias=self.out_proj.bias,
+                num_heads=self.num_heads,
+                dropout_p=self.dropout_p if self.training else 0.0,
+            )
         return qkv_rope_attention(
             x,
             self.qkv_proj.weight,
@@ -86,16 +105,28 @@ class OptimizedDecoderBlock(_torch_nn()[1].Module):
         norm_eps: float = 1e-6,
         bias: bool = False,
         dropout_p: float = 0.0,
+        layer_idx: int | None = None,
+        use_triton: bool = False,
     ):
         torch, nn = _torch_nn()
         super().__init__()
+        self.layer_idx = layer_idx
         self.input_norm = OptimizedRMSNorm(hidden_size, eps=norm_eps)
-        self.self_attn = OptimizedSelfAttention(hidden_size, num_heads, bias=bias, dropout_p=dropout_p)
+        self.self_attn = OptimizedSelfAttention(hidden_size, num_heads, bias=bias, dropout_p=dropout_p, layer_idx=layer_idx)
         self.post_attention_norm = OptimizedRMSNorm(hidden_size, eps=norm_eps)
-        self.mlp = OptimizedSwiGLUMLP(hidden_size, intermediate_size, bias=bias)
+        self.mlp = OptimizedSwiGLUMLP(hidden_size, intermediate_size, bias=bias, use_triton=use_triton)
 
-    def forward(self, x, cos=None, sin=None, *, is_causal: bool = True):
-        x = x + self.self_attn(self.input_norm(x), cos=cos, sin=sin, is_causal=is_causal)
+    def forward(self, x, cos=None, sin=None, *, is_causal: bool = True, kv_cache=None, cache_position: int | None = None, layer_idx: int | None = None):
+        effective_layer_idx = self.layer_idx if layer_idx is None else layer_idx
+        x = x + self.self_attn(
+            self.input_norm(x),
+            cos=cos,
+            sin=sin,
+            is_causal=is_causal,
+            kv_cache=kv_cache,
+            layer_idx=effective_layer_idx,
+            cache_position=cache_position,
+        )
         x = x + self.mlp(self.post_attention_norm(x))
         return x
 

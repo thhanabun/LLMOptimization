@@ -54,12 +54,16 @@ def _registry() -> dict[str, Callable[..., Any]]:
     return {
         "rms_norm": rms_norm,
         "rms_norm_manual_backward": rms_norm_manual_backward,
+        "triton_rms_norm": triton_rms_norm,
         "apply_rope": apply_rope,
+        "triton_apply_rope": triton_apply_rope,
         "swiglu": swiglu,
+        "triton_swiglu_activation": triton_swiglu_activation,
         "scaled_dot_product_attention": scaled_dot_product_attention,
         "chunked_cross_entropy": chunked_cross_entropy,
         "linear_cross_entropy": linear_cross_entropy,
         "qkv_rope_attention": qkv_rope_attention,
+        "qkv_rope_attention_cached": qkv_rope_attention_cached,
     }
 
 
@@ -75,13 +79,14 @@ def rms_norm(x, weight, eps: float = 1e-6, bias=None):
     return y
 
 
-def rms_norm_manual_backward(x, weight, eps: float = 1e-6, bias=None):
-    """RMSNorm with a compact manual backward path.
+def triton_rms_norm(x, weight, eps: float = 1e-6, bias=None):
+    from .triton_kernels import triton_rms_norm as _triton_rms_norm
 
-    PyTorch's default autograd tracks every forward primitive. This custom
-    backward saves only x, weight, and inv_rms, then recomputes the small formula
-    during backward. It is still pure PyTorch, but the saved graph is much leaner.
-    """
+    return _triton_rms_norm(x, weight, eps=eps, bias=bias)
+
+
+def rms_norm_manual_backward(x, weight, eps: float = 1e-6, bias=None):
+    """RMSNorm with a compact manual backward path."""
 
     torch = require_torch()
 
@@ -136,15 +141,27 @@ def apply_rope(q, k, cos, sin):
     )
 
 
-def swiglu(x, gate_weight, up_weight, down_weight, gate_bias=None, up_bias=None, down_bias=None):
-    """SwiGLU MLP using PyTorch linear kernels and one explicit activation product."""
+def triton_apply_rope(q, k, cos, sin):
+    from .triton_kernels import triton_apply_rope as _triton_apply_rope
+
+    return _triton_apply_rope(q, k, cos, sin)
+
+
+def swiglu(x, gate_weight, up_weight, down_weight, gate_bias=None, up_bias=None, down_bias=None, *, use_triton: bool = False):
+    """SwiGLU MLP using PyTorch linear kernels and optional Triton activation fusion."""
 
     torch = require_torch()
     functional = torch.nn.functional
     gate = functional.linear(x, gate_weight, gate_bias)
     up = functional.linear(x, up_weight, up_bias)
-    hidden = functional.silu(gate) * up
+    hidden = triton_swiglu_activation(gate, up) if use_triton else functional.silu(gate) * up
     return functional.linear(hidden, down_weight, down_bias)
+
+
+def triton_swiglu_activation(gate, up):
+    from .triton_kernels import triton_swiglu_activation as _triton_swiglu_activation
+
+    return _triton_swiglu_activation(gate, up)
 
 
 def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None):
@@ -174,8 +191,41 @@ def qkv_rope_attention(
     dropout_p: float = 0.0,
     is_causal: bool = True,
 ):
-    """Fused-ish transformer attention primitive: qkv projection, optional RoPE, SDPA, output projection."""
+    """Transformer attention primitive: qkv projection, optional RoPE, SDPA, output projection."""
 
+    q, k, v = project_qkv(x, qkv_weight, qkv_bias, num_heads)
+    if cos is not None and sin is not None:
+        q, k = apply_rope(q, k, cos, sin)
+    out = scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=is_causal)
+    return merge_attention_output(out, out_weight, out_bias)
+
+
+def qkv_rope_attention_cached(
+    x,
+    qkv_weight,
+    out_weight,
+    *,
+    kv_cache,
+    layer_idx: int,
+    cache_position: int | None = None,
+    cos=None,
+    sin=None,
+    qkv_bias=None,
+    out_bias=None,
+    num_heads: int = 1,
+    dropout_p: float = 0.0,
+):
+    """Attention primitive that writes K/V into StaticKVCache and attends over cached tokens."""
+
+    q, k_new, v_new = project_qkv(x, qkv_weight, qkv_bias, num_heads)
+    if cos is not None and sin is not None:
+        q, k_new = apply_rope(q, k_new, cos, sin)
+    k, v = kv_cache.append_layer(layer_idx, k_new, v_new, position=cache_position)
+    out = scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=False)
+    return merge_attention_output(out, out_weight, out_bias)
+
+
+def project_qkv(x, qkv_weight, qkv_bias, num_heads: int):
     torch = require_torch()
     functional = torch.nn.functional
     batch, seq, hidden = x.shape
@@ -187,11 +237,15 @@ def qkv_rope_attention(
     q = q.view(batch, seq, num_heads, head_dim).transpose(1, 2)
     k = k.view(batch, seq, num_heads, head_dim).transpose(1, 2)
     v = v.view(batch, seq, num_heads, head_dim).transpose(1, 2)
-    if cos is not None and sin is not None:
-        q, k = apply_rope(q, k, cos, sin)
-    out = scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=is_causal)
-    out = out.transpose(1, 2).contiguous().view(batch, seq, hidden)
-    return functional.linear(out, out_weight, out_bias)
+    return q, k, v
+
+
+def merge_attention_output(out, out_weight, out_bias=None):
+    torch = require_torch()
+    functional = torch.nn.functional
+    batch, heads, seq, head_dim = out.shape
+    merged = out.transpose(1, 2).contiguous().view(batch, seq, heads * head_dim)
+    return functional.linear(merged, out_weight, out_bias)
 
 
 def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index: int = -100, reduction: str = "mean"):
@@ -211,14 +265,7 @@ def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index:
         pieces = []
         for start in range(0, flat_logits.shape[0], chunk_size):
             end = min(start + chunk_size, flat_logits.shape[0])
-            pieces.append(
-                functional.cross_entropy(
-                    flat_logits[start:end],
-                    flat_targets[start:end],
-                    ignore_index=ignore_index,
-                    reduction="none",
-                )
-            )
+            pieces.append(functional.cross_entropy(flat_logits[start:end], flat_targets[start:end], ignore_index=ignore_index, reduction="none"))
         return torch.cat(pieces, dim=0).reshape_as(targets)
 
     total = flat_logits.new_zeros(())
@@ -226,12 +273,7 @@ def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index:
     for start in range(0, flat_logits.shape[0], chunk_size):
         end = min(start + chunk_size, flat_logits.shape[0])
         target_chunk = flat_targets[start:end]
-        total = total + functional.cross_entropy(
-            flat_logits[start:end],
-            target_chunk,
-            ignore_index=ignore_index,
-            reduction="sum",
-        )
+        total = total + functional.cross_entropy(flat_logits[start:end], target_chunk, ignore_index=ignore_index, reduction="sum")
         valid = valid + (target_chunk != ignore_index).sum().to(dtype=flat_logits.dtype)
 
     if reduction == "sum":
@@ -239,21 +281,8 @@ def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index:
     return total / valid.clamp_min(1)
 
 
-def linear_cross_entropy(
-    hidden,
-    lm_head_weight,
-    targets,
-    bias=None,
-    chunk_size: int = 1024,
-    ignore_index: int = -100,
-    reduction: str = "mean",
-):
-    """Compute LM-head projection and CE in token chunks.
-
-    This avoids materializing [batch, seq, vocab] logits all at once. It is a
-    practical memory win for long-context SFT and large vocabularies, while still
-    using standard PyTorch autograd for correctness.
-    """
+def linear_cross_entropy(hidden, lm_head_weight, targets, bias=None, chunk_size: int = 1024, ignore_index: int = -100, reduction: str = "mean"):
+    """Compute LM-head projection and CE in token chunks without materializing full logits."""
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -270,9 +299,7 @@ def linear_cross_entropy(
         for start in range(0, flat_hidden.shape[0], chunk_size):
             end = min(start + chunk_size, flat_hidden.shape[0])
             logits = functional.linear(flat_hidden[start:end], lm_head_weight, bias)
-            pieces.append(
-                functional.cross_entropy(logits, flat_targets[start:end], ignore_index=ignore_index, reduction="none")
-            )
+            pieces.append(functional.cross_entropy(logits, flat_targets[start:end], ignore_index=ignore_index, reduction="none"))
         return torch.cat(pieces, dim=0).reshape_as(targets)
 
     total = flat_hidden.new_zeros(())

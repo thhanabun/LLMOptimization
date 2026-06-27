@@ -64,10 +64,14 @@ print(estimate.to_text())
 The kernel layer provides PyTorch-compatible building blocks for transformer hot paths:
 
 - `rms_norm` with fp32 variance and output dtype preservation.
+- `rms_norm_manual_backward` for compact PyTorch autograd storage during training.
+- Optional `triton_rms_norm`, `triton_apply_rope`, and `triton_swiglu_activation` wrappers with PyTorch fallback.
 - `apply_rope` for interleaved rotary embeddings.
 - `swiglu` for gated MLP blocks.
 - `scaled_dot_product_attention`, dispatching to PyTorch SDPA and FlashAttention-style kernels where available.
 - `chunked_cross_entropy` to reduce loss-time memory spikes on long sequences.
+- `linear_cross_entropy` to compute LM-head projection and CE in chunks without materializing full `[batch, seq, vocab]` logits.
+- `qkv_rope_attention_cached` to write K/V into `StaticKVCache` and attend over cached tokens during decode.
 
 Run a local microbenchmark:
 
@@ -85,6 +89,37 @@ out = scaled_dot_product_attention(q, k, v, is_causal=True)
 loss = linear_cross_entropy(hidden, lm_head.weight, labels, chunk_size=512)
 ```
 
+
+Cache-aware decoder block:
+
+```python
+import torch
+from llm_memlab.kv_cache import KVCacheConfig, StaticKVCache
+from llm_memlab.modules import OptimizedDecoderBlock, build_rope_cache
+
+block = OptimizedDecoderBlock(
+    hidden_size=4096,
+    intermediate_size=11008,
+    num_heads=32,
+    layer_idx=0,
+    use_triton=True,
+)
+cache = StaticKVCache(KVCacheConfig(
+    num_layers=1,
+    batch_size=1,
+    num_heads=32,
+    head_dim=128,
+    max_seq_len=4096,
+    dtype=torch.float16,
+    device="cuda",
+))
+cos, sin = build_rope_cache(4096, 128, dtype=torch.float16, device="cuda")
+
+# Decode token at position t without reallocating K/V tensors.
+y = block(x_t, cos=cos[t:t+1], sin=sin[t:t+1], kv_cache=cache, cache_position=t)
+```
+
+Triton is optional. If `triton` is not installed or tensors are on CPU, the Triton wrapper functions fall back to the PyTorch reference path.
 Use `torch.compile` when available:
 
 ```python
@@ -151,10 +186,13 @@ The trace records module runtime, input/output tensor bytes, parameter counts, i
 ## Roadmap
 
 1. Add model importers for Hugging Face transformer blocks.
-2. Add Triton fused kernels for RMSNorm, RoPE, SwiGLU, and cross entropy.
+2. Add fuller Triton kernels for backward paths, attention variants, and cross entropy.
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
+
+
 
 
 

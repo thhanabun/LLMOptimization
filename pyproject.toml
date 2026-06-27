@@ -18,6 +18,7 @@ classifiers = [
 
 [project.optional-dependencies]
 torch = ["torch"]
+triton = ["triton"]
 dev = ["pytest"]
 
 [project.scripts]
