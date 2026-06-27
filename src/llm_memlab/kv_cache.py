@@ -34,6 +34,7 @@ class KVCacheStats:
     bytes_allocated: int
     bytes_used: int
     reference_bytes: int | None = None
+    storage_dtype: str | None = None
 
     @property
     def utilization(self) -> float:
@@ -55,6 +56,8 @@ class KVCacheStats:
             ("Used", format_bytes(self.bytes_used)),
             ("Utilization", f"{self.utilization:.1%}"),
         ]
+        if self.storage_dtype is not None:
+            rows.append(("Storage dtype", self.storage_dtype))
         if self.reference_bytes is not None:
             rows.append(("Reference fp cache", format_bytes(self.reference_bytes)))
         if self.compression_ratio is not None:
@@ -122,6 +125,7 @@ class StaticKVCache:
             capacity=self.capacity,
             bytes_allocated=self.nbytes,
             bytes_used=used,
+            storage_dtype=str(self.keys.dtype).replace("torch.", ""),
         )
 
     def _validate_append(self, layer_idx: int, key, value, position: int | None) -> tuple[int, int]:
@@ -141,30 +145,44 @@ class StaticKVCache:
 
 
 class QuantizedStaticKVCache(StaticKVCache):
-    """Int8 KV cache with per-token/per-head scales.
+    """Preallocated KV cache with int/float compressed storage modes.
 
-    K/V are stored as int8 plus one scale per [batch, head, token] vector. Reads
-    dequantize to `config.dtype` (or float16 by default) so existing attention
-    code can use the cache without changing its math path.
+    `quant_dtype` supports the common inference cache choices: int8, uint8,
+    fp16, bf16, fp32, and fp8_e4m3fn when the installed PyTorch exposes it.
+    Quantized modes keep per-token/per-head metadata and dequantize reads to
+    `config.dtype` (or fp16 by default) so existing attention code can keep the
+    same math path.
     """
 
-    def __init__(self, config: KVCacheConfig, *, scale_dtype=None, eps: float = 1e-6):
+    def __init__(self, config: KVCacheConfig, *, quant_dtype: str | Any = "int8", scale_dtype=None, eps: float = 1e-6):
         torch = require_torch()
         self.config = config
         self.output_dtype = config.dtype or torch.float16
+        self.quant_dtype_name, self.storage_dtype = resolve_kv_storage_dtype(quant_dtype)
         self.scale_dtype = scale_dtype or torch.float16
         self.eps = eps
         shape = (config.num_layers, config.batch_size, config.num_heads, config.max_seq_len, config.head_dim)
         scale_shape = (config.num_layers, config.batch_size, config.num_heads, config.max_seq_len, 1)
-        self.keys = torch.empty(shape, device=config.device, dtype=torch.int8)
+        self.keys = torch.empty(shape, device=config.device, dtype=self.storage_dtype)
         self.values = torch.empty_like(self.keys)
-        self.key_scales = torch.empty(scale_shape, device=config.device, dtype=self.scale_dtype)
-        self.value_scales = torch.empty_like(self.key_scales)
         self.length = 0
+        self.key_scales = None
+        self.value_scales = None
+        self.key_zero_points = None
+        self.value_zero_points = None
+        if self.quant_dtype_name == "int8":
+            self.key_scales = torch.empty(scale_shape, device=config.device, dtype=self.scale_dtype)
+            self.value_scales = torch.empty_like(self.key_scales)
+        elif self.quant_dtype_name == "uint8":
+            self.key_scales = torch.empty(scale_shape, device=config.device, dtype=self.scale_dtype)
+            self.value_scales = torch.empty_like(self.key_scales)
+            self.key_zero_points = torch.empty(scale_shape, device=config.device, dtype=torch.uint8)
+            self.value_zero_points = torch.empty_like(self.key_zero_points)
 
     @property
     def nbytes(self) -> int:
-        tensors = (self.keys, self.values, self.key_scales, self.value_scales)
+        tensors = [self.keys, self.values]
+        tensors.extend(tensor for tensor in (self.key_scales, self.value_scales, self.key_zero_points, self.value_zero_points) if tensor is not None)
         return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
 
     @property
@@ -177,40 +195,91 @@ class QuantizedStaticKVCache(StaticKVCache):
 
     def append_layer(self, layer_idx: int, key, value, position: int | None = None):
         pos, end = self._validate_append(layer_idx, key, value, position)
-        q_key, key_scale = quantize_int8_per_token(key, eps=self.eps)
-        q_value, value_scale = quantize_int8_per_token(value, eps=self.eps)
-        self.keys[layer_idx, :, :, pos:end, :].copy_(q_key)
-        self.values[layer_idx, :, :, pos:end, :].copy_(q_value)
-        self.key_scales[layer_idx, :, :, pos:end, :].copy_(key_scale.to(dtype=self.scale_dtype))
-        self.value_scales[layer_idx, :, :, pos:end, :].copy_(value_scale.to(dtype=self.scale_dtype))
+        if self.quant_dtype_name == "int8":
+            q_key, key_scale = quantize_int8_per_token(key, eps=self.eps)
+            q_value, value_scale = quantize_int8_per_token(value, eps=self.eps)
+            self.keys[layer_idx, :, :, pos:end, :].copy_(q_key)
+            self.values[layer_idx, :, :, pos:end, :].copy_(q_value)
+            self.key_scales[layer_idx, :, :, pos:end, :].copy_(key_scale.to(dtype=self.scale_dtype))
+            self.value_scales[layer_idx, :, :, pos:end, :].copy_(value_scale.to(dtype=self.scale_dtype))
+        elif self.quant_dtype_name == "uint8":
+            q_key, key_scale, key_zp = quantize_uint8_per_token(key, eps=self.eps)
+            q_value, value_scale, value_zp = quantize_uint8_per_token(value, eps=self.eps)
+            self.keys[layer_idx, :, :, pos:end, :].copy_(q_key)
+            self.values[layer_idx, :, :, pos:end, :].copy_(q_value)
+            self.key_scales[layer_idx, :, :, pos:end, :].copy_(key_scale.to(dtype=self.scale_dtype))
+            self.value_scales[layer_idx, :, :, pos:end, :].copy_(value_scale.to(dtype=self.scale_dtype))
+            self.key_zero_points[layer_idx, :, :, pos:end, :].copy_(key_zp)
+            self.value_zero_points[layer_idx, :, :, pos:end, :].copy_(value_zp)
+        else:
+            self.keys[layer_idx, :, :, pos:end, :].copy_(key.to(dtype=self.storage_dtype))
+            self.values[layer_idx, :, :, pos:end, :].copy_(value.to(dtype=self.storage_dtype))
         self.length = max(self.length, end)
         return self.get_layer(layer_idx)
 
     def get_layer(self, layer_idx: int, end: int | None = None):
         stop = self.length if end is None else end
-        key = dequantize_int8_per_token(
-            self.keys[layer_idx, :, :, :stop, :],
-            self.key_scales[layer_idx, :, :, :stop, :],
-            dtype=self.output_dtype,
-        )
-        value = dequantize_int8_per_token(
-            self.values[layer_idx, :, :, :stop, :],
-            self.value_scales[layer_idx, :, :, :stop, :],
-            dtype=self.output_dtype,
-        )
+        key_store = self.keys[layer_idx, :, :, :stop, :]
+        value_store = self.values[layer_idx, :, :, :stop, :]
+        if self.quant_dtype_name == "int8":
+            key = dequantize_int8_per_token(key_store, self.key_scales[layer_idx, :, :, :stop, :], dtype=self.output_dtype)
+            value = dequantize_int8_per_token(value_store, self.value_scales[layer_idx, :, :, :stop, :], dtype=self.output_dtype)
+        elif self.quant_dtype_name == "uint8":
+            key = dequantize_uint8_per_token(
+                key_store,
+                self.key_scales[layer_idx, :, :, :stop, :],
+                self.key_zero_points[layer_idx, :, :, :stop, :],
+                dtype=self.output_dtype,
+            )
+            value = dequantize_uint8_per_token(
+                value_store,
+                self.value_scales[layer_idx, :, :, :stop, :],
+                self.value_zero_points[layer_idx, :, :, :stop, :],
+                dtype=self.output_dtype,
+            )
+        else:
+            key = key_store.to(dtype=self.output_dtype)
+            value = value_store.to(dtype=self.output_dtype)
         return key, value
 
     def stats(self) -> KVCacheStats:
         used_vectors = self.config.num_layers * self.config.batch_size * self.config.num_heads * self.length
-        used_q = used_vectors * self.config.head_dim * 2 * self.keys.element_size()
-        used_scales = used_vectors * 2 * self.key_scales.element_size()
+        used = used_vectors * self.config.head_dim * 2 * self.keys.element_size()
+        if self.key_scales is not None:
+            used += used_vectors * 2 * self.key_scales.element_size()
+        if self.key_zero_points is not None:
+            used += used_vectors * 2 * self.key_zero_points.element_size()
         return KVCacheStats(
             tokens_used=self.length,
             capacity=self.capacity,
             bytes_allocated=self.nbytes,
-            bytes_used=used_q + used_scales,
+            bytes_used=used,
             reference_bytes=self.reference_nbytes,
+            storage_dtype=self.quant_dtype_name,
         )
+
+
+def resolve_kv_storage_dtype(quant_dtype: str | Any) -> tuple[str, Any]:
+    torch = require_torch()
+    if not isinstance(quant_dtype, str):
+        name = str(quant_dtype).replace("torch.", "")
+        return name, quant_dtype
+    normalized = quant_dtype.lower().replace("torch.", "").replace("float16", "fp16").replace("float32", "fp32").replace("bfloat16", "bf16")
+    aliases = {
+        "int8": torch.int8,
+        "uint8": torch.uint8,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+        "float": torch.float32,
+    }
+    if normalized in aliases:
+        canonical = {"half": "fp16", "float": "fp32"}.get(normalized, normalized)
+        return canonical, aliases[normalized]
+    if normalized in {"fp8", "fp8_e4m3fn", "float8_e4m3fn"} and hasattr(torch, "float8_e4m3fn"):
+        return "fp8_e4m3fn", torch.float8_e4m3fn
+    raise ValueError("quant_dtype must be one of: int8, uint8, fp16, bf16, fp32, fp8_e4m3fn(if supported)")
 
 
 def quantize_int8_per_token(x, *, eps: float = 1e-6):
@@ -225,6 +294,25 @@ def quantize_int8_per_token(x, *, eps: float = 1e-6):
 def dequantize_int8_per_token(q, scale, *, dtype=None):
     torch = require_torch()
     out = q.float() * scale.float()
+    return out.to(dtype=dtype or torch.float16)
+
+
+def quantize_uint8_per_token(x, *, eps: float = 1e-6):
+    """Asymmetric uint8 quantization with per-vector min/max metadata."""
+
+    torch = require_torch()
+    x_float = x.detach().float()
+    x_min = x_float.amin(dim=-1, keepdim=True)
+    x_max = x_float.amax(dim=-1, keepdim=True)
+    scale = ((x_max - x_min).clamp_min(eps)) / 255.0
+    zero_point = torch.round((-x_min / scale).clamp(0, 255)).to(torch.uint8)
+    q = torch.round(x_float / scale + zero_point.float()).clamp(0, 255).to(torch.uint8)
+    return q, scale, zero_point
+
+
+def dequantize_uint8_per_token(q, scale, zero_point, *, dtype=None):
+    torch = require_torch()
+    out = (q.float() - zero_point.float()) * scale.float()
     return out.to(dtype=dtype or torch.float16)
 
 

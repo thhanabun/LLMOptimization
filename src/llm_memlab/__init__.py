@@ -2,6 +2,7 @@
 
 from .benchmark import BenchmarkConfig, BenchmarkResult, benchmark_callable, benchmark_decode, benchmark_forward, compare_benchmarks
 from .bytes import dtype_size_bytes, format_bytes, parse_bytes
+from .compare_report import CompareReport, compare_report_to_html, write_compare_html
 from .estimates import MemoryEstimate, TransformerConfig, estimate_transformer_memory, preset_config
 from .html_report import trace_to_html, write_trace_html
 from .inspector import ModelArchitectureInfo, inspect_model, load_hf_model
@@ -31,20 +32,25 @@ from .kv_cache import (
     QuantizedStaticKVCache,
     StaticKVCache,
     dequantize_int8_per_token,
+    dequantize_uint8_per_token,
     greedy_decode,
     quantize_int8_per_token,
+    quantize_uint8_per_token,
+    resolve_kv_storage_dtype,
     sample_next_token,
 )
-from .kv_quality import KVQualityResult, evaluate_int8_kv_quality
-from .patchers import PatchReport, optimize_hf_model
+from .kv_quality import AttentionKVQualityResult, KVQualityResult, evaluate_attention_kv_quality, evaluate_int8_kv_quality, evaluate_kv_quantization_quality
+from .patchers import PackedQKVAttentionAdapter, PatchReport, optimize_hf_model, optimize_llama_qwen_attention
 from .planner import BufferPlan, MemoryPlanner, TensorLifetime
 from .torch_debugger import TorchTrace, trace_forward
 from .triton_kernels import triton_available
 
 __all__ = [
+    "AttentionKVQualityResult",
     "BenchmarkConfig",
     "BenchmarkResult",
     "BufferPlan",
+    "CompareReport",
     "DecodeConfig",
     "DecodeResult",
     "GraphSpec",
@@ -55,6 +61,7 @@ __all__ = [
     "MemoryPlanner",
     "ModelArchitectureInfo",
     "OperationSpec",
+    "PackedQKVAttentionAdapter",
     "PatchReport",
     "QuantizedStaticKVCache",
     "StaticKVCache",
@@ -68,10 +75,14 @@ __all__ = [
     "benchmark_forward",
     "chunked_cross_entropy",
     "compare_benchmarks",
+    "compare_report_to_html",
     "dequantize_int8_per_token",
+    "dequantize_uint8_per_token",
     "dtype_size_bytes",
     "estimate_transformer_memory",
+    "evaluate_attention_kv_quality",
     "evaluate_int8_kv_quality",
+    "evaluate_kv_quantization_quality",
     "format_bytes",
     "greedy_decode",
     "inspect_model",
@@ -79,11 +90,14 @@ __all__ = [
     "linear_cross_entropy",
     "load_hf_model",
     "optimize_hf_model",
+    "optimize_llama_qwen_attention",
     "parse_bytes",
     "preset_config",
     "qkv_rope_attention",
     "qkv_rope_attention_cached",
     "quantize_int8_per_token",
+    "quantize_uint8_per_token",
+    "resolve_kv_storage_dtype",
     "rms_norm",
     "rms_norm_manual_backward",
     "sample_next_token",
@@ -97,5 +111,6 @@ __all__ = [
     "triton_quantize_int8_per_token",
     "triton_rms_norm",
     "triton_swiglu_activation",
+    "write_compare_html",
     "write_trace_html",
 ]

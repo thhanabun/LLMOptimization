@@ -55,15 +55,23 @@ def main(argv: list[str] | None = None) -> int:
 
     cache_parser = subparsers.add_parser("cache-demo", help="Compare fp and quantized KV cache memory on random K/V tensors.")
     cache_parser.add_argument("--quantized", action="store_true", help="Use QuantizedStaticKVCache instead of fp cache.")
+    cache_parser.add_argument("--dtype", default="int8", help="Quantized cache storage dtype: int8, uint8, fp16, bf16, fp32, fp8_e4m3fn")
     cache_parser.add_argument("--tokens", type=int, default=8)
     cache_parser.set_defaults(func=_cache_demo)
 
     patch_parser = subparsers.add_parser("patch-demo", help="Patch a tiny Hugging Face-style model and print the patch report.")
+    patch_parser.add_argument("--attention", action="store_true", help="Also run the experimental packed-QKV attention patcher.")
     patch_parser.set_defaults(func=_patch_demo)
 
     bench_parser = subparsers.add_parser("benchmark-demo", help="Run a tiny forward benchmark and patcher comparison.")
     bench_parser.add_argument("--repeats", type=int, default=10)
     bench_parser.set_defaults(func=_benchmark_demo)
+
+    compare_parser = subparsers.add_parser("compare-demo", help="Write an HTML baseline-vs-optimized report for a tiny model.")
+    compare_parser.add_argument("--out", default="compare_demo.html")
+    compare_parser.add_argument("--repeats", type=int, default=5)
+    compare_parser.add_argument("--kv-dtype", default="int8", help="KV dtype used in the quality section.")
+    compare_parser.set_defaults(func=_compare_demo)
 
     inspect_demo_parser = subparsers.add_parser("inspect-demo", help="Inspect a tiny local HF-style model.")
     inspect_demo_parser.set_defaults(func=_inspect_demo)
@@ -86,10 +94,12 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_hf_parser.add_argument("--local-files-only", action="store_true")
     benchmark_hf_parser.set_defaults(func=_benchmark_hf)
 
-    kv_quality_parser = subparsers.add_parser("kv-quality-demo", help="Measure int8 KV quantization error on random K/V-like tensors.")
+    kv_quality_parser = subparsers.add_parser("kv-quality-demo", help="Measure KV quantization error on random K/V-like tensors.")
     kv_quality_parser.add_argument("--tokens", type=int, default=16)
     kv_quality_parser.add_argument("--heads", type=int, default=8)
     kv_quality_parser.add_argument("--head-dim", type=int, default=64)
+    kv_quality_parser.add_argument("--dtype", default="int8", help="int8, uint8, fp16, bf16, fp32, fp8_e4m3fn")
+    kv_quality_parser.add_argument("--attention", action="store_true", help="Compare SDPA output with quantized/dequantized K/V.")
     kv_quality_parser.set_defaults(func=_kv_quality_demo)
 
     args = parser.parse_args(argv)
@@ -275,7 +285,7 @@ def _cache_demo(args: argparse.Namespace) -> int:
     from .kv_cache import KVCacheConfig, QuantizedStaticKVCache, StaticKVCache
 
     cfg = KVCacheConfig(num_layers=4, batch_size=1, num_heads=8, head_dim=64, max_seq_len=max(args.tokens, 1), dtype=torch.float16)
-    cache = QuantizedStaticKVCache(cfg) if args.quantized else StaticKVCache(cfg)
+    cache = QuantizedStaticKVCache(cfg, quant_dtype=args.dtype) if args.quantized else StaticKVCache(cfg)
     for pos in range(args.tokens):
         key = torch.randn(1, 8, 1, 64, dtype=torch.float16)
         value = torch.randn(1, 8, 1, 64, dtype=torch.float16)
@@ -312,17 +322,32 @@ def _patch_demo(args: argparse.Namespace) -> int:
         def forward(self, x):
             return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
 
+    class TinyLlamaAttention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.num_heads = 2
+            self.head_dim = 4
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
     class TinyHFBlock(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.input_layernorm = TinyRMSNorm(8)
+            self.self_attn = TinyLlamaAttention()
             self.mlp = TinyMLP()
 
         def forward(self, x):
-            return self.mlp(self.input_layernorm(x))
+            x = self.input_layernorm(x)
+            return self.mlp(x + self.self_attn(x))
 
     model = TinyHFBlock()
-    _, report = optimize_hf_model(model)
+    _, report = optimize_hf_model(model, patch_attention=args.attention)
     print(report.to_text())
     print(model)
     return 0
@@ -362,6 +387,62 @@ def _benchmark_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+def _compare_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run compare-demo: pip install torch")
+        return 2
+
+    from .benchmark import BenchmarkConfig, benchmark_callable
+    from .compare_report import CompareReport, write_compare_html
+    from .kv_quality import evaluate_attention_kv_quality
+    from .patchers import optimize_hf_model
+    from .torch_debugger import TorchTrace
+
+    class TinyMLP(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(64, 128, bias=False)
+            self.up_proj = torch.nn.Linear(64, 128, bias=False)
+            self.down_proj = torch.nn.Linear(128, 64, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
+    x = torch.randn(8, 32, 64)
+    baseline = TinyMLP().eval()
+    optimized = TinyMLP().eval()
+    optimized.load_state_dict(baseline.state_dict())
+    _, patch_report = optimize_hf_model(optimized)
+    cfg = BenchmarkConfig(warmup=2, repeats=args.repeats)
+    benchmarks = [
+        benchmark_callable("baseline", lambda: baseline(x), cfg),
+        benchmark_callable("optimized", lambda: optimized(x), cfg),
+    ]
+    with TorchTrace(baseline) as baseline_trace:
+        _ = baseline(x)
+    with TorchTrace(optimized) as optimized_trace:
+        _ = optimized(x)
+    q = torch.randn(1, 4, 1, 32, dtype=torch.float16)
+    k = torch.randn(1, 4, 16, 32, dtype=torch.float16)
+    v = torch.randn(1, 4, 16, 32, dtype=torch.float16)
+    kv_quality = evaluate_attention_kv_quality(q, k, v, quant_dtype=args.kv_dtype)
+    path = write_compare_html(
+        CompareReport(
+            title="llm-memlab compare demo",
+            benchmarks=benchmarks,
+            patch_report=patch_report,
+            baseline_trace=baseline_trace,
+            optimized_trace=optimized_trace,
+            kv_quality=kv_quality,
+        ),
+        args.out,
+    )
+    print(f"Compare HTML report written to {path}")
+    return 0
 
 def _inspect_demo(args: argparse.Namespace) -> int:
     try:
@@ -463,10 +544,16 @@ def _kv_quality_demo(args: argparse.Namespace) -> int:
         print("PyTorch is not installed. Install it to run kv-quality-demo: pip install torch")
         return 2
 
-    from .kv_quality import evaluate_int8_kv_quality
+    from .kv_quality import evaluate_attention_kv_quality, evaluate_kv_quantization_quality
 
     x = torch.randn(1, args.heads, args.tokens, args.head_dim, dtype=torch.float16)
-    print(evaluate_int8_kv_quality(x).to_text())
+    if args.attention:
+        q = torch.randn(1, args.heads, 1, args.head_dim, dtype=torch.float16)
+        k = torch.randn(1, args.heads, args.tokens, args.head_dim, dtype=torch.float16)
+        v = torch.randn(1, args.heads, args.tokens, args.head_dim, dtype=torch.float16)
+        print(evaluate_attention_kv_quality(q, k, v, quant_dtype=args.dtype).to_text())
+    else:
+        print(evaluate_kv_quantization_quality(x, quant_dtype=args.dtype).to_text())
     return 0
 
 def _bench(torch, fn, repeats: int) -> float:
@@ -503,6 +590,9 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
+
+
+
 
 
 

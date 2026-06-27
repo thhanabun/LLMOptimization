@@ -186,10 +186,17 @@ Use `--local-files-only` when the model is already cached locally.
 
 ## Quantized KV Quality
 
-Measure int8 KV quantization error and compression on random K/V-like tensors:
+Measure KV cache storage error and compression on random K/V-like tensors. Common storage dtypes are supported: `int8`, `uint8`, `fp16`, `bf16`, `fp32`, and `fp8_e4m3fn` when the local PyTorch build exposes it.
 
 ```powershell
-python -m llm_memlab kv-quality-demo --tokens 128 --heads 32 --head-dim 128
+python -m llm_memlab kv-quality-demo --tokens 128 --heads 32 --head-dim 128 --dtype int8
+python -m llm_memlab kv-quality-demo --tokens 128 --heads 32 --head-dim 128 --dtype uint8
+```
+
+Use `--attention` to compare real SDPA output before and after quantizing/dequantizing K/V, which is closer to the inference quality question than tensor reconstruction alone:
+
+```powershell
+python -m llm_memlab kv-quality-demo --tokens 128 --heads 32 --head-dim 128 --dtype int8 --attention
 ```
 
 ## Model Patching
@@ -203,12 +210,13 @@ model, report = optimize_hf_model(model, use_triton=True)
 print(report.to_text())
 ```
 
-The patcher currently replaces RMSNorm-like modules and SwiGLU MLP modules when their local interfaces match. Attention modules are reported as candidates because Hugging Face attention signatures vary across model families, cache implementations, masks, and grouped-query attention layouts.
+The patcher replaces RMSNorm-like modules and SwiGLU MLP modules when their local interfaces match. Attention replacement is opt-in with `patch_attention=True` or `optimize_llama_qwen_attention()` because Hugging Face attention signatures vary across model families, cache implementations, masks, RoPE, and grouped-query attention layouts. The current attention adapter targets simple Llama/Qwen-like equal-width q/k/v/o modules and packs q/k/v into one projection before PyTorch SDPA.
 
 Try the local demo:
 
 ```powershell
 python -m llm_memlab patch-demo
+python -m llm_memlab patch-demo --attention
 ```
 
 ## Benchmarking
@@ -226,6 +234,12 @@ Run the built-in patcher comparison:
 
 ```powershell
 python -m llm_memlab benchmark-demo --repeats 20
+```
+
+Write one HTML report that combines baseline vs optimized benchmark, patch coverage, trace summary, and KV attention quality:
+
+```powershell
+python -m llm_memlab compare-demo --out compare_demo.html --repeats 5 --kv-dtype int8
 ```
 
 ## Visual Debugger
@@ -273,10 +287,11 @@ Compare fp and quantized cache memory locally:
 
 ```powershell
 python -m llm_memlab cache-demo --tokens 128
-python -m llm_memlab cache-demo --tokens 128 --quantized
+python -m llm_memlab cache-demo --tokens 128 --quantized --dtype int8
+python -m llm_memlab cache-demo --tokens 128 --quantized --dtype uint8
 ```
 
-The int8 cache is lossy but usually much smaller. Compression is below 2x for fp16 because per-token scales are stored alongside K/V.
+The int8/uint8 cache is lossy but usually much smaller. Compression is below the ideal 2x for fp16 because per-token metadata is stored alongside K/V. Floating storage modes (`fp16`, `bf16`, `fp32`) are also available for controlled quality and allocator experiments.
 
 ## PyTorch Runtime Debugging
 
@@ -307,6 +322,7 @@ The trace records module runtime, input/output tensor bytes, parameter counts, i
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
 
 
 

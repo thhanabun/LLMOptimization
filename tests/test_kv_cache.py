@@ -15,8 +15,10 @@ from llm_memlab.kv_cache import (
     QuantizedStaticKVCache,
     StaticKVCache,
     dequantize_int8_per_token,
+    dequantize_uint8_per_token,
     greedy_decode,
     quantize_int8_per_token,
+    quantize_uint8_per_token,
     sample_next_token,
 )
 
@@ -41,6 +43,14 @@ class KVCacheTests(unittest.TestCase):
         self.assertEqual(scale.shape, (2, 3, 4, 1))
         self.assertLess((x - y).abs().mean().item(), 0.02)
 
+    def test_uint8_quantize_dequantize_roundtrip(self):
+        x = torch.randn(2, 3, 4, 8)
+        q, scale, zero_point = quantize_uint8_per_token(x)
+        y = dequantize_uint8_per_token(q, scale, zero_point, dtype=torch.float32)
+        self.assertEqual(q.dtype, torch.uint8)
+        self.assertEqual(zero_point.dtype, torch.uint8)
+        self.assertLess((x - y).abs().mean().item(), 0.02)
+
     def test_quantized_cache_append_dequantizes_and_compresses(self):
         cfg = KVCacheConfig(num_layers=2, batch_size=1, num_heads=3, head_dim=16, max_seq_len=8, dtype=torch.float32)
         cache = QuantizedStaticKVCache(cfg)
@@ -55,6 +65,18 @@ class KVCacheTests(unittest.TestCase):
         self.assertLess(cache.nbytes, fp_cache.nbytes)
         self.assertGreater(cache.stats().compression_ratio, 1.0)
         self.assertLess((q_key - key).abs().mean().item(), 0.02)
+
+    def test_quantized_cache_supports_common_storage_dtypes(self):
+        cfg = KVCacheConfig(num_layers=1, batch_size=1, num_heads=2, head_dim=8, max_seq_len=4, dtype=torch.float32)
+        key = torch.randn(1, 2, 2, 8)
+        value = torch.randn(1, 2, 2, 8)
+        for dtype_name in ("int8", "uint8", "fp16", "bf16", "fp32"):
+            with self.subTest(dtype_name=dtype_name):
+                cache = QuantizedStaticKVCache(cfg, quant_dtype=dtype_name)
+                cached_key, cached_value = cache.append_layer(0, key, value)
+                self.assertEqual(cached_key.shape, key.shape)
+                self.assertEqual(cached_value.dtype, torch.float32)
+                self.assertIn(dtype_name, cache.stats().to_text())
 
     def test_sample_next_token_greedy(self):
         logits = torch.tensor([[0.1, 2.0, 0.3]])
