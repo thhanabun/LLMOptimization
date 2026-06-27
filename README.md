@@ -78,10 +78,11 @@ python -m llm_memlab kernel-demo --device auto --repeats 20
 Use the kernels directly:
 
 ```python
-from llm_memlab.kernels import rms_norm, scaled_dot_product_attention
+from llm_memlab.kernels import linear_cross_entropy, rms_norm_manual_backward, scaled_dot_product_attention
 
-y = rms_norm(x, weight)
+y = rms_norm_manual_backward(x, weight)
 out = scaled_dot_product_attention(q, k, v, is_causal=True)
+loss = linear_cross_entropy(hidden, lm_head.weight, labels, chunk_size=512)
 ```
 
 Use `torch.compile` when available:
@@ -92,6 +93,38 @@ from llm_memlab.kernels import KernelConfig, kernel
 rms = kernel("rms_norm", KernelConfig(compile=True))
 y = rms(x, weight)
 ```
+
+
+## KV Cache Decode
+
+The inference layer includes a static KV cache and a generic HuggingFace-style decode loop:
+
+```python
+import torch
+from llm_memlab.kv_cache import DecodeConfig, KVCacheConfig, StaticKVCache, greedy_decode
+
+cache = StaticKVCache(KVCacheConfig(
+    num_layers=32,
+    batch_size=1,
+    num_heads=32,
+    head_dim=128,
+    max_seq_len=4096,
+    dtype=torch.float16,
+    device="cuda",
+))
+
+result = greedy_decode(model, input_ids, DecodeConfig(max_new_tokens=64))
+print(result.to_text())
+print(cache.stats().to_text())
+```
+
+Run the tiny local demo:
+
+```powershell
+python -m llm_memlab decode-demo --steps 8
+```
+
+This makes inference less black-box by reporting per-token latency, throughput, generated token IDs, and cache length when the model returns `past_key_values`.
 
 ## PyTorch Runtime Debugging
 
@@ -113,8 +146,7 @@ with TorchTrace(model) as trace:
 print(trace.to_text())
 ```
 
-The trace records module runtime, output tensor bytes, parameter bytes,
-CUDA allocator deltas when CUDA is available, and NaN/Inf flags.
+The trace records module runtime, input/output tensor bytes, parameter counts, input/output shapes, activation statistics, CUDA allocator deltas when CUDA is available, NaN/Inf flags, hot layers, and optional gradient statistics.
 
 ## Roadmap
 
@@ -123,4 +155,7 @@ CUDA allocator deltas when CUDA is available, and NaN/Inf flags.
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
+
+
 

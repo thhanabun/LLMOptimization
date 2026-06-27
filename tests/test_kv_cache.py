@@ -1,0 +1,56 @@
+import pathlib
+import sys
+import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+
+try:
+    import torch
+except ImportError:  # pragma: no cover
+    torch = None
+
+from llm_memlab.kv_cache import DecodeConfig, KVCacheConfig, StaticKVCache, greedy_decode, sample_next_token
+
+
+@unittest.skipIf(torch is None, "PyTorch is not installed")
+class KVCacheTests(unittest.TestCase):
+    def test_static_cache_append_and_stats(self):
+        cache = StaticKVCache(KVCacheConfig(num_layers=2, batch_size=1, num_heads=3, head_dim=4, max_seq_len=8, dtype=torch.float32))
+        key = torch.randn(1, 3, 2, 4)
+        value = torch.randn(1, 3, 2, 4)
+        cached_key, cached_value = cache.append_layer(0, key, value)
+        self.assertEqual(cached_key.shape, (1, 3, 2, 4))
+        self.assertEqual(cached_value.shape, (1, 3, 2, 4))
+        self.assertEqual(cache.length, 2)
+        self.assertGreater(cache.stats().bytes_allocated, cache.stats().bytes_used)
+
+    def test_sample_next_token_greedy(self):
+        logits = torch.tensor([[0.1, 2.0, 0.3]])
+        token = sample_next_token(logits)
+        self.assertEqual(int(token.item()), 1)
+
+    def test_greedy_decode_dict_model(self):
+        class TinyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def forward(self, input_ids, past_key_values=None, use_cache=True, **kwargs):
+                self.calls += 1
+                vocab = 8
+                logits = torch.zeros(input_ids.shape[0], input_ids.shape[1], vocab)
+                next_token = (input_ids[:, -1] + 1) % vocab
+                logits[:, -1, :].scatter_(1, next_token[:, None], 1.0)
+                past = ((torch.zeros(1, 1, self.calls, 1), torch.zeros(1, 1, self.calls, 1)),)
+                return {"logits": logits, "past_key_values": past}
+
+        prompt = torch.tensor([[1, 2]])
+        result = greedy_decode(TinyModel(), prompt, DecodeConfig(max_new_tokens=3))
+        self.assertEqual(result.sequences.tolist(), [[1, 2, 3, 4, 5]])
+        self.assertEqual(len(result.steps), 3)
+        self.assertIn("Throughput", result.to_text())
+
+
+if __name__ == "__main__":
+    unittest.main()
+

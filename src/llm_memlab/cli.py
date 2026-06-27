@@ -39,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.set_defaults(func=_plan_demo)
 
     trace_parser = subparsers.add_parser("trace-demo", help="Trace a tiny PyTorch model if torch is installed.")
+    trace_parser.add_argument("--all-modules", action="store_true", help="Record container modules as well as leaf modules.")
     trace_parser.set_defaults(func=_trace_demo)
 
     kernel_parser = subparsers.add_parser("kernel-demo", help="Run correctness checks and microbenchmarks for optimized kernels.")
@@ -46,6 +47,10 @@ def main(argv: list[str] | None = None) -> int:
     kernel_parser.add_argument("--compile", action="store_true", help="Use torch.compile where available.")
     kernel_parser.add_argument("--repeats", type=int, default=20)
     kernel_parser.set_defaults(func=_kernel_demo)
+
+    decode_parser = subparsers.add_parser("decode-demo", help="Run a tiny KV-cache decode-loop demo.")
+    decode_parser.add_argument("--steps", type=int, default=6)
+    decode_parser.set_defaults(func=_decode_demo)
 
     args = parser.parse_args(argv)
     return args.func(args)
@@ -108,9 +113,9 @@ def _trace_demo(args: argparse.Namespace) -> int:
         torch.nn.Linear(64, 16),
     )
     x = torch.randn(8, 16)
-    with TorchTrace(model) as trace:
+    with TorchTrace(model, record_leaf_only=not args.all_modules) as trace:
         _ = model(x)
-    print(trace.to_text())
+    print(trace.to_text(show_shapes=True, show_stats=True))
     return 0
 
 
@@ -121,7 +126,7 @@ def _kernel_demo(args: argparse.Namespace) -> int:
         print("PyTorch is not installed. Install it to run kernel-demo: pip install torch")
         return 2
 
-    from .kernels import KernelConfig, chunked_cross_entropy, kernel
+    from .kernels import KernelConfig, chunked_cross_entropy, kernel, linear_cross_entropy
     from .report import make_table
 
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
@@ -134,8 +139,10 @@ def _kernel_demo(args: argparse.Namespace) -> int:
     cfg = KernelConfig(compile=args.compile)
 
     rms = kernel("rms_norm", cfg)
+    rms_manual = kernel("rms_norm_manual_backward", cfg)
     sdpa = kernel("scaled_dot_product_attention", cfg)
     swiglu_kernel = kernel("swiglu", cfg)
+    qkv_attn = kernel("qkv_rope_attention", cfg)
 
     x = torch.randn(2, 128, 512, device=device, dtype=dtype)
     weight = torch.randn(512, device=device, dtype=dtype)
@@ -147,19 +154,31 @@ def _kernel_demo(args: argparse.Namespace) -> int:
     v = torch.randn(2, 8, 128, 64, device=device, dtype=dtype)
     logits = torch.randn(2, 128, 2048, device=device, dtype=dtype)
     targets = torch.randint(0, 2048, (2, 128), device=device)
+    lm_head = torch.randn(2048, 512, device=device, dtype=dtype)
+    qkv_weight = torch.randn(1536, 512, device=device, dtype=dtype)
+    out_weight = torch.randn(512, 512, device=device, dtype=dtype)
+    cos = torch.randn(128, 64, device=device, dtype=dtype)
+    sin = torch.randn(128, 64, device=device, dtype=dtype)
 
-    checks = []
-    checks.append(("rms_norm", tuple(rms(x, weight).shape)))
-    checks.append(("swiglu", tuple(swiglu_kernel(x, gate, up, down).shape)))
-    checks.append(("sdpa", tuple(sdpa(q, k, v, is_causal=True).shape)))
-    checks.append(("chunked_cross_entropy", tuple(chunked_cross_entropy(logits, targets, chunk_size=64).shape)))
+    checks = [
+        ("rms_norm", tuple(rms(x, weight).shape)),
+        ("rms_norm_manual_backward", tuple(rms_manual(x, weight).shape)),
+        ("swiglu", tuple(swiglu_kernel(x, gate, up, down).shape)),
+        ("sdpa", tuple(sdpa(q, k, v, is_causal=True).shape)),
+        ("qkv_rope_attention", tuple(qkv_attn(x, qkv_weight, out_weight, cos=cos, sin=sin, num_heads=8).shape)),
+        ("chunked_cross_entropy", tuple(chunked_cross_entropy(logits, targets, chunk_size=64).shape)),
+        ("linear_cross_entropy", tuple(linear_cross_entropy(x, lm_head, targets, chunk_size=64).shape)),
+    ]
 
     rows = []
     for name, fn in [
         ("rms_norm", lambda: rms(x, weight)),
+        ("rms_norm_manual_backward", lambda: rms_manual(x, weight)),
         ("swiglu", lambda: swiglu_kernel(x, gate, up, down)),
         ("sdpa", lambda: sdpa(q, k, v, is_causal=True)),
+        ("qkv_rope_attention", lambda: qkv_attn(x, qkv_weight, out_weight, cos=cos, sin=sin, num_heads=8)),
         ("chunked_cross_entropy", lambda: chunked_cross_entropy(logits, targets, chunk_size=64)),
+        ("linear_cross_entropy", lambda: linear_cross_entropy(x, lm_head, targets, chunk_size=64)),
     ]:
         rows.append((name, f"{_bench(torch, fn, args.repeats):.3f} ms"))
 
@@ -167,6 +186,32 @@ def _kernel_demo(args: argparse.Namespace) -> int:
     print(make_table(("Kernel", "Output shape"), checks))
     print("")
     print(make_table(("Kernel", "Avg time"), rows))
+    return 0
+
+
+def _decode_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run decode-demo: pip install torch")
+        return 2
+
+    from .kv_cache import DecodeConfig, greedy_decode
+
+    class TinyNextToken(torch.nn.Module):
+        def __init__(self, vocab_size: int = 16):
+            super().__init__()
+            self.vocab_size = vocab_size
+
+        def forward(self, input_ids, past_key_values=None, use_cache=True, **kwargs):
+            logits = torch.zeros(input_ids.shape[0], input_ids.shape[1], self.vocab_size, device=input_ids.device)
+            next_token = (input_ids[:, -1] + 1) % self.vocab_size
+            logits[:, -1, :].scatter_(1, next_token[:, None], 1.0)
+            return {"logits": logits, "past_key_values": past_key_values}
+
+    prompt = torch.tensor([[1, 2, 3]])
+    result = greedy_decode(TinyNextToken(), prompt, DecodeConfig(max_new_tokens=args.steps))
+    print(result.to_text())
     return 0
 
 
@@ -204,3 +249,4 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
+

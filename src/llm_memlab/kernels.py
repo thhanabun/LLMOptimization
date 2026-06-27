@@ -35,15 +35,9 @@ def maybe_compile(fn: Callable[..., Any], config: KernelConfig | None = None) ->
     return compiler(fn, backend=cfg.compile_backend, fullgraph=cfg.fullgraph)
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=64)
 def _compiled(name: str, backend: str | None, fullgraph: bool):
-    registry = {
-        "rms_norm": rms_norm,
-        "apply_rope": apply_rope,
-        "swiglu": swiglu,
-        "scaled_dot_product_attention": scaled_dot_product_attention,
-        "chunked_cross_entropy": chunked_cross_entropy,
-    }
+    registry = _registry()
     return maybe_compile(registry[name], KernelConfig(True, backend, fullgraph))
 
 
@@ -52,14 +46,21 @@ def kernel(name: str, config: KernelConfig | None = None) -> Callable[..., Any]:
 
     cfg = config or KernelConfig()
     if not cfg.compile:
-        return {
-            "rms_norm": rms_norm,
-            "apply_rope": apply_rope,
-            "swiglu": swiglu,
-            "scaled_dot_product_attention": scaled_dot_product_attention,
-            "chunked_cross_entropy": chunked_cross_entropy,
-        }[name]
+        return _registry()[name]
     return _compiled(name, cfg.compile_backend, cfg.fullgraph)
+
+
+def _registry() -> dict[str, Callable[..., Any]]:
+    return {
+        "rms_norm": rms_norm,
+        "rms_norm_manual_backward": rms_norm_manual_backward,
+        "apply_rope": apply_rope,
+        "swiglu": swiglu,
+        "scaled_dot_product_attention": scaled_dot_product_attention,
+        "chunked_cross_entropy": chunked_cross_entropy,
+        "linear_cross_entropy": linear_cross_entropy,
+        "qkv_rope_attention": qkv_rope_attention,
+    }
 
 
 def rms_norm(x, weight, eps: float = 1e-6, bias=None):
@@ -74,6 +75,47 @@ def rms_norm(x, weight, eps: float = 1e-6, bias=None):
     return y
 
 
+def rms_norm_manual_backward(x, weight, eps: float = 1e-6, bias=None):
+    """RMSNorm with a compact manual backward path.
+
+    PyTorch's default autograd tracks every forward primitive. This custom
+    backward saves only x, weight, and inv_rms, then recomputes the small formula
+    during backward. It is still pure PyTorch, but the saved graph is much leaner.
+    """
+
+    torch = require_torch()
+
+    class _RMSNorm(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, weight, bias, eps):
+            x_float = x.float()
+            inv_rms = torch.rsqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + eps)
+            y = x * inv_rms.to(dtype=x.dtype) * weight.to(dtype=x.dtype)
+            if bias is not None:
+                y = y + bias.to(dtype=x.dtype)
+            ctx.save_for_backward(x, weight, inv_rms)
+            ctx.has_bias = bias is not None
+            return y
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            x, weight, inv_rms = ctx.saved_tensors
+            grad = grad_output.float()
+            x_float = x.float()
+            weight_float = weight.float()
+            weighted_grad = grad * weight_float
+            hidden = x.shape[-1]
+            dot = (weighted_grad * x_float).sum(dim=-1, keepdim=True) / hidden
+            dx = (weighted_grad * inv_rms) - (x_float * inv_rms.pow(3) * dot)
+            reduce_dims = tuple(range(grad_output.dim() - 1))
+            normalized = x_float * inv_rms
+            dweight = (grad * normalized).sum(dim=reduce_dims).to(dtype=weight.dtype)
+            dbias = grad.sum(dim=reduce_dims).to(dtype=weight.dtype) if ctx.has_bias else None
+            return dx.to(dtype=x.dtype), dweight, dbias, None
+
+    return _RMSNorm.apply(x, weight, bias, eps)
+
+
 def rotate_half_interleaved(x):
     """Rotate [..., x0, x1, x2, x3] into [..., -x1, x0, -x3, x2]."""
 
@@ -84,11 +126,7 @@ def rotate_half_interleaved(x):
 
 
 def apply_rope(q, k, cos, sin):
-    """Apply rotary position embeddings to q and k.
-
-    q/k are usually shaped [batch, heads, seq, head_dim]. cos/sin may be
-    [seq, head_dim], [seq, head_dim / 2], or already broadcastable.
-    """
+    """Apply interleaved rotary position embeddings to q and k."""
 
     cos = _expand_rope_cache(cos, q)
     sin = _expand_rope_cache(sin, q)
@@ -124,13 +162,40 @@ def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0
     )
 
 
-def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index: int = -100, reduction: str = "mean"):
-    """Cross entropy over vocab chunks to avoid one huge loss allocation.
+def qkv_rope_attention(
+    x,
+    qkv_weight,
+    out_weight,
+    cos=None,
+    sin=None,
+    qkv_bias=None,
+    out_bias=None,
+    num_heads: int = 1,
+    dropout_p: float = 0.0,
+    is_causal: bool = True,
+):
+    """Fused-ish transformer attention primitive: qkv projection, optional RoPE, SDPA, output projection."""
 
-    This keeps logits intact but chunks the flattened token dimension, which is
-    useful for long-context SFT where loss temporaries can spike near the end of
-    the forward pass.
-    """
+    torch = require_torch()
+    functional = torch.nn.functional
+    batch, seq, hidden = x.shape
+    if hidden % num_heads != 0:
+        raise ValueError("hidden size must be divisible by num_heads")
+    qkv = functional.linear(x, qkv_weight, qkv_bias)
+    q, k, v = qkv.chunk(3, dim=-1)
+    head_dim = hidden // num_heads
+    q = q.view(batch, seq, num_heads, head_dim).transpose(1, 2)
+    k = k.view(batch, seq, num_heads, head_dim).transpose(1, 2)
+    v = v.view(batch, seq, num_heads, head_dim).transpose(1, 2)
+    if cos is not None and sin is not None:
+        q, k = apply_rope(q, k, cos, sin)
+    out = scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=is_causal)
+    out = out.transpose(1, 2).contiguous().view(batch, seq, hidden)
+    return functional.linear(out, out_weight, out_bias)
+
+
+def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index: int = -100, reduction: str = "mean"):
+    """Cross entropy over token chunks to avoid one huge loss allocation."""
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -174,8 +239,57 @@ def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index:
     return total / valid.clamp_min(1)
 
 
-def _expand_rope_cache(cache, target):
+def linear_cross_entropy(
+    hidden,
+    lm_head_weight,
+    targets,
+    bias=None,
+    chunk_size: int = 1024,
+    ignore_index: int = -100,
+    reduction: str = "mean",
+):
+    """Compute LM-head projection and CE in token chunks.
+
+    This avoids materializing [batch, seq, vocab] logits all at once. It is a
+    practical memory win for long-context SFT and large vocabularies, while still
+    using standard PyTorch autograd for correctness.
+    """
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if reduction not in {"mean", "sum", "none"}:
+        raise ValueError("reduction must be one of: mean, sum, none")
+
     torch = require_torch()
+    functional = torch.nn.functional
+    flat_hidden = hidden.reshape(-1, hidden.shape[-1])
+    flat_targets = targets.reshape(-1)
+
+    if reduction == "none":
+        pieces = []
+        for start in range(0, flat_hidden.shape[0], chunk_size):
+            end = min(start + chunk_size, flat_hidden.shape[0])
+            logits = functional.linear(flat_hidden[start:end], lm_head_weight, bias)
+            pieces.append(
+                functional.cross_entropy(logits, flat_targets[start:end], ignore_index=ignore_index, reduction="none")
+            )
+        return torch.cat(pieces, dim=0).reshape_as(targets)
+
+    total = flat_hidden.new_zeros(())
+    valid = flat_hidden.new_zeros(())
+    for start in range(0, flat_hidden.shape[0], chunk_size):
+        end = min(start + chunk_size, flat_hidden.shape[0])
+        target_chunk = flat_targets[start:end]
+        logits = functional.linear(flat_hidden[start:end], lm_head_weight, bias)
+        total = total + functional.cross_entropy(logits, target_chunk, ignore_index=ignore_index, reduction="sum")
+        valid = valid + (target_chunk != ignore_index).sum().to(dtype=flat_hidden.dtype)
+
+    if reduction == "sum":
+        return total
+    return total / valid.clamp_min(1)
+
+
+def _expand_rope_cache(cache, target):
     if cache.shape[-1] * 2 == target.shape[-1]:
         cache = cache.repeat_interleave(2, dim=-1)
     while cache.dim() < target.dim():
