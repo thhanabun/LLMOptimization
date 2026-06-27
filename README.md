@@ -161,6 +161,61 @@ python -m llm_memlab decode-demo --steps 8
 
 This makes inference less black-box by reporting per-token latency, throughput, generated token IDs, and cache length when the model returns `past_key_values`.
 
+
+## Model Patching
+
+Patch Hugging Face-style Llama/Qwen modules conservatively:
+
+```python
+from llm_memlab.patchers import optimize_hf_model
+
+model, report = optimize_hf_model(model, use_triton=True)
+print(report.to_text())
+```
+
+The patcher currently replaces RMSNorm-like modules and SwiGLU MLP modules when their local interfaces match. Attention modules are reported as candidates because Hugging Face attention signatures vary across model families, cache implementations, masks, and grouped-query attention layouts.
+
+Try the local demo:
+
+```powershell
+python -m llm_memlab patch-demo
+```
+
+## Benchmarking
+
+Benchmark any callable or model forward pass:
+
+```python
+from llm_memlab.benchmark import BenchmarkConfig, benchmark_callable
+
+result = benchmark_callable("forward", lambda: model(input_ids), BenchmarkConfig(warmup=3, repeats=20))
+print(result.to_text())
+```
+
+Run the built-in patcher comparison:
+
+```powershell
+python -m llm_memlab benchmark-demo --repeats 20
+```
+
+## Visual Debugger
+
+Export a layer-level HTML report from a trace:
+
+```python
+from llm_memlab.html_report import write_trace_html
+from llm_memlab.torch_debugger import trace_forward
+
+_, trace = trace_forward(model, x)
+write_trace_html(trace, "trace.html")
+```
+
+Or via CLI:
+
+```powershell
+python -m llm_memlab trace-demo --html-out trace_demo.html
+```
+
 ## PyTorch Runtime Debugging
 
 ```python
@@ -190,6 +245,7 @@ The trace records module runtime, input/output tensor bytes, parameter counts, i
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
 
 
 

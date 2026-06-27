@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
 
     trace_parser = subparsers.add_parser("trace-demo", help="Trace a tiny PyTorch model if torch is installed.")
     trace_parser.add_argument("--all-modules", action="store_true", help="Record container modules as well as leaf modules.")
+    trace_parser.add_argument("--html-out", help="Write an interactive-ish HTML layer report to this path.")
     trace_parser.set_defaults(func=_trace_demo)
 
     kernel_parser = subparsers.add_parser("kernel-demo", help="Run correctness checks and microbenchmarks for optimized kernels.")
@@ -51,6 +52,13 @@ def main(argv: list[str] | None = None) -> int:
     decode_parser = subparsers.add_parser("decode-demo", help="Run a tiny KV-cache decode-loop demo.")
     decode_parser.add_argument("--steps", type=int, default=6)
     decode_parser.set_defaults(func=_decode_demo)
+
+    patch_parser = subparsers.add_parser("patch-demo", help="Patch a tiny Hugging Face-style model and print the patch report.")
+    patch_parser.set_defaults(func=_patch_demo)
+
+    bench_parser = subparsers.add_parser("benchmark-demo", help="Run a tiny forward benchmark and patcher comparison.")
+    bench_parser.add_argument("--repeats", type=int, default=10)
+    bench_parser.set_defaults(func=_benchmark_demo)
 
     args = parser.parse_args(argv)
     return args.func(args)
@@ -116,6 +124,12 @@ def _trace_demo(args: argparse.Namespace) -> int:
     with TorchTrace(model, record_leaf_only=not args.all_modules) as trace:
         _ = model(x)
     print(trace.to_text(show_shapes=True, show_stats=True))
+    if args.html_out:
+        from .html_report import write_trace_html
+
+        path = write_trace_html(trace, args.html_out, title="llm-memlab trace demo")
+        print(f"HTML report written to {path}")
+    return 0
     return 0
 
 
@@ -215,6 +229,85 @@ def _decode_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+def _patch_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run patch-demo: pip install torch")
+        return 2
+
+    from .patchers import optimize_hf_model
+
+    class TinyRMSNorm(torch.nn.Module):
+        def __init__(self, hidden_size: int):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+            self.variance_epsilon = 1e-6
+
+        def forward(self, x):
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon) * self.weight
+
+    class TinyMLP(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 16, bias=False)
+            self.up_proj = torch.nn.Linear(8, 16, bias=False)
+            self.down_proj = torch.nn.Linear(16, 8, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
+    class TinyHFBlock(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_layernorm = TinyRMSNorm(8)
+            self.mlp = TinyMLP()
+
+        def forward(self, x):
+            return self.mlp(self.input_layernorm(x))
+
+    model = TinyHFBlock()
+    _, report = optimize_hf_model(model)
+    print(report.to_text())
+    print(model)
+    return 0
+
+
+def _benchmark_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run benchmark-demo: pip install torch")
+        return 2
+
+    from .benchmark import BenchmarkConfig, benchmark_callable, compare_benchmarks
+    from .patchers import optimize_hf_model
+
+    class TinyMLP(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(64, 128, bias=False)
+            self.up_proj = torch.nn.Linear(64, 128, bias=False)
+            self.down_proj = torch.nn.Linear(128, 64, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
+    x = torch.randn(8, 32, 64)
+    baseline = TinyMLP().eval()
+    optimized = TinyMLP().eval()
+    optimized.load_state_dict(baseline.state_dict())
+    optimize_hf_model(optimized)
+    cfg = BenchmarkConfig(warmup=2, repeats=args.repeats)
+    results = [
+        benchmark_callable("baseline", lambda: baseline(x), cfg),
+        benchmark_callable("patched", lambda: optimized(x), cfg),
+    ]
+    print(compare_benchmarks(results))
+    return 0
+
 def _bench(torch, fn, repeats: int) -> float:
     repeats = max(1, repeats)
     for _ in range(2):
@@ -249,4 +342,7 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
+
+
+
 

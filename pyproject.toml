@@ -19,6 +19,7 @@ classifiers = [
 [project.optional-dependencies]
 torch = ["torch"]
 triton = ["triton"]
+transformers = ["transformers"]
 dev = ["pytest"]
 
 [project.scripts]
@@ -26,3 +27,4 @@ llm-memlab = "llm_memlab.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
