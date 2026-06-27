@@ -16,6 +16,7 @@ from llm_memlab.kernels import (
     qkv_rope_attention,
     qkv_rope_attention_cached,
     quantized_kv_attention,
+    select_quantized_attention_backend,
     rms_norm,
     rms_norm_manual_backward,
     scaled_dot_product_attention,
@@ -156,6 +157,13 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(cache.length, 2)
 
 
+
+    def test_quantized_attention_backend_selector(self):
+        q = torch.randn(1, 2, 1, 8)
+        k = torch.randn(1, 2, 4, 8)
+        dispatch = select_quantized_attention_backend(q, k, requested="auto", quant_dtype="int8")
+        self.assertEqual(dispatch.selected_backend, "torch")
+        self.assertIn("fallback", dispatch.reason)
     def test_quantized_kv_attention_preserves_shape(self):
         q = torch.randn(1, 2, 1, 8)
         k = torch.randn(1, 2, 4, 8)
@@ -176,6 +184,7 @@ class KernelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

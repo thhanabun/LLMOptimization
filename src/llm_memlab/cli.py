@@ -103,6 +103,27 @@ def main(argv: list[str] | None = None) -> int:
     compare_hf_parser.add_argument("--local-files-only", action="store_true")
     compare_hf_parser.set_defaults(func=_compare_hf)
 
+
+    suite_hf_parser = subparsers.add_parser("suite-hf", help="Run prefill/generate/VRAM benchmark suite on a HF model.")
+    suite_hf_parser.add_argument("--model", required=True)
+    suite_hf_parser.add_argument("--prompt", default="Hello")
+    suite_hf_parser.add_argument("--tokens", type=int, default=16)
+    suite_hf_parser.add_argument("--repeats", type=int, default=2)
+    suite_hf_parser.add_argument("--device")
+    suite_hf_parser.add_argument("--dtype", default="auto")
+    suite_hf_parser.add_argument("--local-files-only", action="store_true")
+    suite_hf_parser.set_defaults(func=_suite_hf)
+
+    drift_demo_parser = subparsers.add_parser("drift-demo", help="Compare layer-by-layer drift on two tiny local models.")
+    drift_demo_parser.set_defaults(func=_drift_demo)
+
+    drift_hf_parser = subparsers.add_parser("drift-hf", help="Compare layer drift before/after conservative HF patching.")
+    drift_hf_parser.add_argument("--model", required=True)
+    drift_hf_parser.add_argument("--prompt", default="Hello")
+    drift_hf_parser.add_argument("--device")
+    drift_hf_parser.add_argument("--dtype", default="auto")
+    drift_hf_parser.add_argument("--local-files-only", action="store_true")
+    drift_hf_parser.set_defaults(func=_drift_hf)
     scoreboard_hf_parser = subparsers.add_parser("scoreboard-hf", help="Benchmark one or more HF models and write an optimization scoreboard.")
     scoreboard_hf_parser.add_argument("--models", nargs="+", required=True)
     scoreboard_hf_parser.add_argument("--prompt", default="Hello")
@@ -645,6 +666,77 @@ def _compare_hf(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _suite_hf(args: argparse.Namespace) -> int:
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        print("suite-hf requires: pip install torch transformers")
+        return 2
+
+    from .benchmark import BenchmarkConfig
+    from .benchmark_suite import benchmark_inference_suite
+    from .inspector import load_hf_model
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=args.local_files_only)
+        model = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+    except Exception as exc:
+        print(f"Could not load Hugging Face model/tokenizer: {exc}")
+        return 2
+    encoded = tokenizer(args.prompt, return_tensors="pt")
+    if args.device:
+        encoded = {key: value.to(args.device) for key, value in encoded.items()}
+    result = benchmark_inference_suite(model, encoded, model_name=args.model, max_new_tokens=args.tokens, config=BenchmarkConfig(warmup=1, repeats=args.repeats))
+    print(result.to_text())
+    return 0
+
+
+def _drift_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run drift-demo: pip install torch")
+        return 2
+
+    from .drift_debugger import compare_layer_drift
+
+    baseline = torch.nn.Sequential(torch.nn.Linear(8, 16), torch.nn.ReLU(), torch.nn.Linear(16, 8)).eval()
+    candidate = torch.nn.Sequential(torch.nn.Linear(8, 16), torch.nn.ReLU(), torch.nn.Linear(16, 8)).eval()
+    candidate.load_state_dict(baseline.state_dict())
+    with torch.no_grad():
+        candidate[2].weight.add_(0.001)
+    report = compare_layer_drift(baseline, candidate, torch.randn(2, 4, 8))
+    print(report.to_text())
+    return 0
+
+
+def _drift_hf(args: argparse.Namespace) -> int:
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        print("drift-hf requires: pip install torch transformers")
+        return 2
+
+    from .drift_debugger import compare_layer_drift
+    from .inspector import load_hf_model
+    from .patchers import optimize_hf_model
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=args.local_files_only)
+        baseline = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+        candidate = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+    except Exception as exc:
+        print(f"Could not load Hugging Face model/tokenizer: {exc}")
+        return 2
+    optimize_hf_model(candidate)
+    encoded = tokenizer(args.prompt, return_tensors="pt")
+    if args.device:
+        encoded = {key: value.to(args.device) for key, value in encoded.items()}
+    report = compare_layer_drift(baseline, candidate, **encoded)
+    print(report.to_text(limit=32))
+    return 0
+
 def _scoreboard_hf(args: argparse.Namespace) -> int:
     try:
         import torch
@@ -879,6 +971,8 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
+
+
 
 
 

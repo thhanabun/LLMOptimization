@@ -2,14 +2,17 @@
 
 from .attention_debugger import AttentionStats, analyze_qk_attention, attention_stats_to_text, collect_attention_stats
 from .benchmark import BenchmarkConfig, BenchmarkResult, benchmark_callable, benchmark_decode, benchmark_forward, compare_benchmarks
+from .benchmark_suite import InferenceSuiteResult, benchmark_inference_suite, compare_inference_suites
 from .bytes import dtype_size_bytes, format_bytes, parse_bytes
 from .compare_report import CompareReport, compare_report_to_html, scoreboard_to_html, write_compare_html, write_scoreboard_html
+from .drift_debugger import DriftReport, LayerDriftRecord, compare_layer_drift
 from .estimates import MemoryEstimate, TransformerConfig, estimate_transformer_memory, preset_config
 from .html_report import trace_timeline_to_html, trace_to_html, write_timeline_html, write_trace_html
 from .inspector import ModelArchitectureInfo, inspect_model, load_hf_model
 from .ir import GraphSpec, OperationSpec, TensorSpec
 from .kernels import (
     KernelConfig,
+    QuantizedAttentionDispatch,
     apply_rope,
     chunked_cross_entropy,
     kernel,
@@ -17,6 +20,7 @@ from .kernels import (
     qkv_rope_attention,
     qkv_rope_attention_cached,
     quantized_kv_attention,
+    select_quantized_attention_backend,
     rms_norm,
     rms_norm_manual_backward,
     scaled_dot_product_attention,
@@ -54,6 +58,8 @@ __all__ = [
     "AttentionKVQualityResult",
     "AttentionStats",
     "BenchmarkConfig",
+    "DriftReport",
+    "InferenceSuiteResult",
     "BenchmarkResult",
     "BufferPlan",
     "CompareReport",
@@ -63,6 +69,7 @@ __all__ = [
     "KVCacheConfig",
     "KVQualityResult",
     "KernelConfig",
+    "LayerDriftRecord",
     "MemoryEstimate",
     "MemoryPlanner",
     "MemoryPolicy",
@@ -73,6 +80,7 @@ __all__ = [
     "PackedQKVAttentionAdapter",
     "PagedKVCache",
     "PatchReport",
+    "QuantizedAttentionDispatch",
     "QuantizedStaticKVCache",
     "StaticKVCache",
     "TensorLifetime",
@@ -84,11 +92,14 @@ __all__ = [
     "attention_stats_to_text",
     "benchmark_callable",
     "benchmark_decode",
+    "benchmark_inference_suite",
     "benchmark_forward",
     "choose_memory_policy",
     "chunked_cross_entropy",
     "collect_attention_stats",
     "compare_benchmarks",
+    "compare_inference_suites",
+    "compare_layer_drift",
     "compare_report_to_html",
     "dequantize_int8_per_token",
     "dequantize_uint8_per_token",
@@ -113,6 +124,7 @@ __all__ = [
     "quantize_int8_per_token",
     "quantize_uint8_per_token",
     "quantized_kv_attention",
+    "select_quantized_attention_backend",
     "resolve_kv_storage_dtype",
     "rms_norm",
     "rms_norm_manual_backward",
@@ -134,4 +146,5 @@ __all__ = [
     "write_compare_html",
     "write_trace_html",
 ]
+
 

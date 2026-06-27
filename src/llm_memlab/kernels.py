@@ -5,6 +5,35 @@ from functools import lru_cache
 from typing import Any, Callable
 
 
+
+@dataclass(frozen=True)
+class QuantizedAttentionDispatch:
+    requested_backend: str
+    selected_backend: str
+    implementation: str
+    quant_dtype: str
+    reason: str = ""
+
+
+def select_quantized_attention_backend(q, k, *, requested: str = "auto", quant_dtype: str = "int8") -> QuantizedAttentionDispatch:
+    if requested not in {"auto", "torch", "triton"}:
+        raise ValueError("backend must be one of: auto, torch, triton")
+    if requested == "torch":
+        return QuantizedAttentionDispatch(requested, "torch", "dequant+sdpa", quant_dtype, "forced torch backend")
+    if getattr(k, "is_cuda", False):
+        try:
+            from .triton_kernels import triton_available
+
+            if triton_available():
+                return QuantizedAttentionDispatch(requested, "triton", "triton-ready-fallback", quant_dtype, "fused kernel placeholder uses fallback today")
+        except Exception as exc:
+            if requested == "triton":
+                raise
+            return QuantizedAttentionDispatch(requested, "torch", "dequant+sdpa", quant_dtype, f"triton unavailable: {exc}")
+    if requested == "triton":
+        return QuantizedAttentionDispatch(requested, "torch", "dequant+sdpa", quant_dtype, "CUDA/Triton not available; using fallback")
+    return QuantizedAttentionDispatch(requested, "torch", "dequant+sdpa", quant_dtype, "portable fallback")
+
 @dataclass(frozen=True)
 class KernelConfig:
     """Runtime options for PyTorch-compatible optimized kernels."""
@@ -203,18 +232,7 @@ def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None
     branch without changing callers.
     """
 
-    if backend not in {"auto", "torch", "triton"}:
-        raise ValueError("backend must be one of: auto, torch, triton")
-    if backend in {"auto", "triton"} and getattr(k, "is_cuda", False):
-        try:
-            from .triton_kernels import triton_available
-
-            if triton_available():
-                # Placeholder dispatch point for a future fused CUDA kernel.
-                pass
-        except Exception:
-            if backend == "triton":
-                raise
+    _dispatch = select_quantized_attention_backend(q, k, requested=backend, quant_dtype=quant_dtype)
     from .kv_quality import _roundtrip
 
     k_dequant = _roundtrip(k, quant_dtype=quant_dtype, eps=eps)
@@ -373,6 +391,7 @@ def _expand_rope_cache(cache, target):
     while cache.dim() < target.dim():
         cache = cache.unsqueeze(0)
     return cache.to(device=target.device, dtype=target.dtype)
+
 
 
 

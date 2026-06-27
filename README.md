@@ -424,13 +424,54 @@ print(report.to_text())
 
 ## Quantized Attention Backend Selector
 
-`quantized_kv_attention` now accepts `backend="auto" | "torch" | "triton"`. The current implementation is a Triton-ready dispatch surface with a portable PyTorch dequant+SDPA fallback.
+`quantized_kv_attention` now accepts `backend="auto" | "torch" | "triton"`, and `select_quantized_attention_backend()` reports the selected backend, implementation label, quant dtype, and fallback reason. The current implementation is a Triton-ready dispatch surface with a portable PyTorch dequant+SDPA fallback.
 
 ```python
 from llm_memlab import quantized_kv_attention
 
 out = quantized_kv_attention(q, k, v, quant_dtype="int8", backend="auto")
 ```
+
+## Benchmark Suite and Drift Debugger
+
+Run a prefill/generate/VRAM benchmark suite for a cached Hugging Face model:
+
+```powershell
+python -m llm_memlab suite-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --tokens 16 --local-files-only
+```
+
+The suite reports prompt tokens, prefill latency, generate latency, prefill tok/s, decode tok/s, and peak CUDA memory when CUDA is available.
+
+Compare layer-by-layer output drift between two model paths:
+
+```powershell
+python -m llm_memlab drift-demo
+python -m llm_memlab drift-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --local-files-only
+```
+
+From Python:
+
+```python
+from llm_memlab import benchmark_inference_suite, compare_layer_drift
+
+suite = benchmark_inference_suite(model, encoded, model_name="my-model", max_new_tokens=16)
+print(suite.to_text())
+
+drift = compare_layer_drift(baseline_model, candidate_model, **encoded)
+print(drift.to_text(limit=32))
+```
+
+## CI and Examples
+
+The repository includes GitHub Actions CI for Python 3.10-3.12 and small examples:
+
+```powershell
+python examples/memory_policy_example.py
+python examples/drift_debugger_example.py
+python examples/hf_suite_example.py Qwen/Qwen2.5-0.5B
+```
+
+The HF example expects the model to be cached locally.
 ## Roadmap
 
 1. Add model importers for Hugging Face transformer blocks.
@@ -438,6 +479,7 @@ out = quantized_kv_attention(q, k, v, quant_dtype="int8", backend="auto")
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
 
 
 
