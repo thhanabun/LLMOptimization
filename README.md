@@ -162,6 +162,36 @@ python -m llm_memlab decode-demo --steps 8
 This makes inference less black-box by reporting per-token latency, throughput, generated token IDs, and cache length when the model returns `past_key_values`.
 
 
+
+## Architecture Inspector
+
+Inspect a local model object or a Hugging Face causal LM:
+
+```powershell
+python -m llm_memlab inspect-demo
+python -m llm_memlab inspect-hf --model Qwen/Qwen2.5-0.5B --local-files-only
+```
+
+The inspector reports core architecture fields, parameter counts, dtype/device summaries, patchable RMSNorm/MLP modules, attention candidates, and fp16/int8 KV cache estimates.
+
+## Hugging Face Benchmark
+
+Benchmark `generate()` before and after conservative llm-memlab patching:
+
+```powershell
+python -m llm_memlab benchmark-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --tokens 32 --repeats 3
+```
+
+Use `--local-files-only` when the model is already cached locally.
+
+## Quantized KV Quality
+
+Measure int8 KV quantization error and compression on random K/V-like tensors:
+
+```powershell
+python -m llm_memlab kv-quality-demo --tokens 128 --heads 32 --head-dim 128
+```
+
 ## Model Patching
 
 Patch Hugging Face-style Llama/Qwen modules conservatively:
@@ -277,6 +307,7 @@ The trace records module runtime, input/output tensor bytes, parameter counts, i
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
 
 
 

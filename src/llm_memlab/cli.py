@@ -65,6 +65,33 @@ def main(argv: list[str] | None = None) -> int:
     bench_parser.add_argument("--repeats", type=int, default=10)
     bench_parser.set_defaults(func=_benchmark_demo)
 
+    inspect_demo_parser = subparsers.add_parser("inspect-demo", help="Inspect a tiny local HF-style model.")
+    inspect_demo_parser.set_defaults(func=_inspect_demo)
+
+    inspect_hf_parser = subparsers.add_parser("inspect-hf", help="Inspect a Hugging Face causal LM architecture.")
+    inspect_hf_parser.add_argument("--model", required=True, help="Model name or local path.")
+    inspect_hf_parser.add_argument("--device")
+    inspect_hf_parser.add_argument("--dtype", default="auto", help="auto, fp16, bf16, or fp32")
+    inspect_hf_parser.add_argument("--seq", type=int, help="Override sequence length for KV cache estimate.")
+    inspect_hf_parser.add_argument("--local-files-only", action="store_true")
+    inspect_hf_parser.set_defaults(func=_inspect_hf)
+
+    benchmark_hf_parser = subparsers.add_parser("benchmark-hf", help="Benchmark Hugging Face generate before/after conservative patching.")
+    benchmark_hf_parser.add_argument("--model", required=True, help="Model name or local path.")
+    benchmark_hf_parser.add_argument("--prompt", default="Hello", help="Prompt text.")
+    benchmark_hf_parser.add_argument("--tokens", type=int, default=16)
+    benchmark_hf_parser.add_argument("--repeats", type=int, default=3)
+    benchmark_hf_parser.add_argument("--device")
+    benchmark_hf_parser.add_argument("--dtype", default="auto")
+    benchmark_hf_parser.add_argument("--local-files-only", action="store_true")
+    benchmark_hf_parser.set_defaults(func=_benchmark_hf)
+
+    kv_quality_parser = subparsers.add_parser("kv-quality-demo", help="Measure int8 KV quantization error on random K/V-like tensors.")
+    kv_quality_parser.add_argument("--tokens", type=int, default=16)
+    kv_quality_parser.add_argument("--heads", type=int, default=8)
+    kv_quality_parser.add_argument("--head-dim", type=int, default=64)
+    kv_quality_parser.set_defaults(func=_kv_quality_demo)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
@@ -334,6 +361,114 @@ def _benchmark_demo(args: argparse.Namespace) -> int:
     print(compare_benchmarks(results))
     return 0
 
+
+
+def _inspect_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run inspect-demo: pip install torch")
+        return 2
+
+    from .inspector import inspect_model
+
+    class TinyConfig:
+        model_type = "tiny-demo"
+        num_hidden_layers = 2
+        hidden_size = 16
+        intermediate_size = 32
+        num_attention_heads = 4
+        num_key_value_heads = 4
+        vocab_size = 128
+        max_position_embeddings = 64
+
+    class TinyRMSNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(16))
+            self.eps = 1e-6
+
+    class TinyMLP(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(16, 32, bias=False)
+            self.up_proj = torch.nn.Linear(16, 32, bias=False)
+            self.down_proj = torch.nn.Linear(32, 16, bias=False)
+
+    class TinyModel(torch.nn.Module):
+        config = TinyConfig()
+
+        def __init__(self):
+            super().__init__()
+            self.norm = TinyRMSNorm()
+            self.mlp = TinyMLP()
+
+    print(inspect_model(TinyModel()).to_text())
+    return 0
+
+
+def _inspect_hf(args: argparse.Namespace) -> int:
+    from .inspector import inspect_model, load_hf_model
+
+    try:
+        model = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+    except Exception as exc:
+        print(f"Could not load Hugging Face model: {exc}")
+        return 2
+    print(inspect_model(model, max_seq_len=args.seq).to_text())
+    return 0
+
+
+def _benchmark_hf(args: argparse.Namespace) -> int:
+    try:
+        import torch
+        from transformers import AutoTokenizer
+    except ImportError:
+        print("benchmark-hf requires: pip install torch transformers")
+        return 2
+
+    from .benchmark import BenchmarkConfig, benchmark_callable, compare_benchmarks
+    from .inspector import load_hf_model
+    from .patchers import optimize_hf_model
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=args.local_files_only)
+        baseline = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+        patched = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+    except Exception as exc:
+        print(f"Could not load Hugging Face model/tokenizer: {exc}")
+        return 2
+
+    optimize_hf_model(patched)
+    encoded = tokenizer(args.prompt, return_tensors="pt")
+    if args.device:
+        encoded = {key: value.to(args.device) for key, value in encoded.items()}
+    cfg = BenchmarkConfig(warmup=1, repeats=args.repeats)
+
+    def run(model):
+        return model.generate(**encoded, max_new_tokens=args.tokens, do_sample=False)
+
+    results = [
+        benchmark_callable("hf-baseline-generate", lambda: run(baseline), cfg),
+        benchmark_callable("llm-memlab-patched-generate", lambda: run(patched), cfg),
+    ]
+    print(compare_benchmarks(results))
+    return 0
+
+
+def _kv_quality_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run kv-quality-demo: pip install torch")
+        return 2
+
+    from .kv_quality import evaluate_int8_kv_quality
+
+    x = torch.randn(1, args.heads, args.tokens, args.head_dim, dtype=torch.float16)
+    print(evaluate_int8_kv_quality(x).to_text())
+    return 0
+
 def _bench(torch, fn, repeats: int) -> float:
     repeats = max(1, repeats)
     for _ in range(2):
@@ -368,6 +503,7 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
+
 
 
 
