@@ -17,6 +17,9 @@ class CompareReport:
     baseline_trace: Any = None
     optimized_trace: Any = None
     kv_quality: Any = None
+    memory_policy: Any = None
+    optimization_report: Any = None
+    attention_stats: tuple[Any, ...] = ()
 
 
 def compare_report_to_html(report: CompareReport) -> str:
@@ -45,9 +48,12 @@ code {{ white-space: pre-wrap; }}
 <h1>{_e(report.title)}</h1>
 <p>Baseline vs optimized run summary for speed, patch coverage, layer trace, and KV cache quality.</p>
 {_benchmark_html(report.benchmarks)}
+{_optimization_html(report.optimization_report)}
+{_memory_policy_html(report.memory_policy)}
 {_patch_html(report.patch_report)}
 {_trace_compare_html(report.baseline_trace, report.optimized_trace)}
 {_kv_quality_html(report.kv_quality)}
+{_attention_stats_html(report.attention_stats)}
 </body>
 </html>"""
 
@@ -123,3 +129,37 @@ def _fmt_peak(value: int | None) -> str:
 
 def _e(value: Any) -> str:
     return html.escape(str(value))
+
+
+def _optimization_html(optimization_report: Any) -> str:
+    if optimization_report is None:
+        return ""
+    findings = getattr(optimization_report, "findings", ())
+    if not findings:
+        try:
+            from .optimization_report import infer_findings
+
+            findings = infer_findings(optimization_report)
+        except Exception:
+            findings = ()
+    rows = "".join(f"<tr><td>{_e(item.area)}</td><td>{_e(item.finding)}</td><td>{_e(item.impact)}</td></tr>" for item in findings)
+    speed = optimization_report.speedup() if hasattr(optimization_report, "speedup") else None
+    speed_card = f"<div class='metric'>Speed vs baseline<b>{speed:.2f}x</b></div>" if speed is not None else ""
+    return f"<section><h2>Optimization summary</h2><div class='metric-grid'>{speed_card}</div><table><thead><tr><th>Area</th><th>Finding</th><th>Impact</th></tr></thead><tbody>{rows}</tbody></table></section>"
+
+
+def _memory_policy_html(memory_policy: Any) -> str:
+    if memory_policy is None:
+        return ""
+    details = _e(memory_policy.to_text() if hasattr(memory_policy, "to_text") else str(memory_policy))
+    return f"<section><h2>Memory policy</h2><pre>{details}</pre></section>"
+
+
+def _attention_stats_html(attention_stats: tuple[Any, ...]) -> str:
+    if not attention_stats:
+        return ""
+    rows = "".join(
+        f"<tr><td>{_e(item.name)}</td><td>{item.entropy:.4f}</td><td>{item.max_probability:.4f}</td><td>{item.dead_head_fraction:.1%}</td><td>{_e(item.shape)}</td></tr>"
+        for item in attention_stats
+    )
+    return "<section><h2>Attention debugger</h2><table><thead><tr><th>Layer</th><th>Entropy</th><th>Max prob</th><th>Dead heads</th><th>Shape</th></tr></thead><tbody>" + rows + "</tbody></table></section>"

@@ -15,6 +15,7 @@ from llm_memlab.kernels import (
     linear_cross_entropy,
     qkv_rope_attention,
     qkv_rope_attention_cached,
+    quantized_kv_attention,
     rms_norm,
     rms_norm_manual_backward,
     scaled_dot_product_attention,
@@ -154,6 +155,13 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(y1.shape, x1.shape)
         self.assertEqual(cache.length, 2)
 
+
+    def test_quantized_kv_attention_preserves_shape(self):
+        q = torch.randn(1, 2, 1, 8)
+        k = torch.randn(1, 2, 4, 8)
+        v = torch.randn(1, 2, 4, 8)
+        out = quantized_kv_attention(q, k, v, quant_dtype="int8")
+        self.assertEqual(out.shape, q.shape)
     def test_sdpa_preserves_shape(self):
         q = torch.randn(2, 4, 8, 16)
         k = torch.randn(2, 4, 8, 16)
@@ -164,4 +172,5 @@ class KernelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

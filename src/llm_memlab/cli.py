@@ -73,6 +73,33 @@ def main(argv: list[str] | None = None) -> int:
     compare_parser.add_argument("--kv-dtype", default="int8", help="KV dtype used in the quality section.")
     compare_parser.set_defaults(func=_compare_demo)
 
+
+    policy_parser = subparsers.add_parser("policy-demo", help="Choose a memory-first runtime policy from a VRAM budget.")
+    policy_parser.add_argument("--max-vram", default="8GB")
+    policy_parser.add_argument("--preset", default="7b-like")
+    policy_parser.add_argument("--seq", type=int, default=4096)
+    policy_parser.set_defaults(func=_policy_demo)
+
+    debug_hf_parser = subparsers.add_parser("debug-hf", help="Trace and attention-debug a Hugging Face causal LM forward pass.")
+    debug_hf_parser.add_argument("--model", required=True)
+    debug_hf_parser.add_argument("--prompt", default="Hello")
+    debug_hf_parser.add_argument("--device")
+    debug_hf_parser.add_argument("--dtype", default="auto")
+    debug_hf_parser.add_argument("--html-out")
+    debug_hf_parser.add_argument("--local-files-only", action="store_true")
+    debug_hf_parser.set_defaults(func=_debug_hf)
+
+    compare_hf_parser = subparsers.add_parser("compare-hf", help="Write an HTML baseline-vs-optimized HF report.")
+    compare_hf_parser.add_argument("--model", required=True)
+    compare_hf_parser.add_argument("--prompt", default="Hello")
+    compare_hf_parser.add_argument("--out", default="compare_hf.html")
+    compare_hf_parser.add_argument("--repeats", type=int, default=2)
+    compare_hf_parser.add_argument("--device")
+    compare_hf_parser.add_argument("--dtype", default="auto")
+    compare_hf_parser.add_argument("--max-vram", default="8GB")
+    compare_hf_parser.add_argument("--kv-dtype", default="int8")
+    compare_hf_parser.add_argument("--local-files-only", action="store_true")
+    compare_hf_parser.set_defaults(func=_compare_hf)
     inspect_demo_parser = subparsers.add_parser("inspect-demo", help="Inspect a tiny local HF-style model.")
     inspect_demo_parser.set_defaults(func=_inspect_demo)
 
@@ -399,6 +426,8 @@ def _compare_demo(args: argparse.Namespace) -> int:
     from .benchmark import BenchmarkConfig, benchmark_callable
     from .compare_report import CompareReport, write_compare_html
     from .kv_quality import evaluate_attention_kv_quality
+    from .memory_policy import choose_memory_policy
+    from .optimization_report import OptimizationReport
     from .patchers import optimize_hf_model
     from .torch_debugger import TorchTrace
 
@@ -430,6 +459,16 @@ def _compare_demo(args: argparse.Namespace) -> int:
     k = torch.randn(1, 4, 16, 32, dtype=torch.float16)
     v = torch.randn(1, 4, 16, 32, dtype=torch.float16)
     kv_quality = evaluate_attention_kv_quality(q, k, v, quant_dtype=args.kv_dtype)
+    policy = choose_memory_policy(max_vram="8GB", sequence_length=1024)
+    opt_report = OptimizationReport(
+        title="llm-memlab compare demo",
+        benchmarks=benchmarks,
+        patch_report=patch_report,
+        memory_policy=policy,
+        baseline_trace=baseline_trace,
+        optimized_trace=optimized_trace,
+        kv_quality=kv_quality,
+    )
     path = write_compare_html(
         CompareReport(
             title="llm-memlab compare demo",
@@ -438,9 +477,138 @@ def _compare_demo(args: argparse.Namespace) -> int:
             baseline_trace=baseline_trace,
             optimized_trace=optimized_trace,
             kv_quality=kv_quality,
+            memory_policy=policy,
+            optimization_report=opt_report,
         ),
         args.out,
     )
+    print(f"Compare HTML report written to {path}")
+    return 0
+
+
+def _policy_demo(args: argparse.Namespace) -> int:
+    from .memory_policy import choose_memory_policy
+
+    estimate = estimate_transformer_memory(preset_config(args.preset, sequence_length=args.seq, batch_size=1, dtype="fp16"))
+
+    class TinyInfo:
+        kv_cache_bytes_fp16 = estimate.kv_cache_bytes
+
+    policy = choose_memory_policy(max_vram=args.max_vram, model_info=TinyInfo(), sequence_length=args.seq)
+    print(policy.to_text())
+    return 0
+
+
+def _debug_hf(args: argparse.Namespace) -> int:
+    try:
+        import torch
+        from transformers import AutoTokenizer
+    except ImportError:
+        print("debug-hf requires: pip install torch transformers")
+        return 2
+
+    from .attention_debugger import attention_stats_to_text, collect_attention_stats
+    from .html_report import write_trace_html
+    from .inspector import load_hf_model
+    from .torch_debugger import trace_forward
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=args.local_files_only)
+        model = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+    except Exception as exc:
+        print(f"Could not load Hugging Face model/tokenizer: {exc}")
+        return 2
+    encoded = tokenizer(args.prompt, return_tensors="pt")
+    if args.device:
+        encoded = {key: value.to(args.device) for key, value in encoded.items()}
+    with torch.no_grad():
+        _, trace = trace_forward(model, **encoded)
+        _, attention_stats = collect_attention_stats(model, **encoded)
+    print(trace.to_text(limit=24, show_shapes=True, show_stats=True))
+    if attention_stats:
+        print("")
+        print("Attention debugger")
+        print(attention_stats_to_text(attention_stats))
+    if args.html_out:
+        path = write_trace_html(trace, args.html_out, title=f"llm-memlab debug: {args.model}")
+        print(f"HTML trace written to {path}")
+    return 0
+
+
+def _compare_hf(args: argparse.Namespace) -> int:
+    try:
+        import torch
+        from transformers import AutoTokenizer
+    except ImportError:
+        print("compare-hf requires: pip install torch transformers")
+        return 2
+
+    from .attention_debugger import collect_attention_stats
+    from .benchmark import BenchmarkConfig, benchmark_callable
+    from .compare_report import CompareReport, write_compare_html
+    from .inspector import inspect_model, load_hf_model
+    from .kv_quality import evaluate_attention_kv_quality
+    from .memory_policy import choose_memory_policy
+    from .optimization_report import OptimizationReport
+    from .patchers import optimize_hf_model
+    from .torch_debugger import TorchTrace
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=args.local_files_only)
+        baseline = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+        optimized = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+    except Exception as exc:
+        print(f"Could not load Hugging Face model/tokenizer: {exc}")
+        return 2
+
+    _, patch_report = optimize_hf_model(optimized)
+    encoded = tokenizer(args.prompt, return_tensors="pt")
+    if args.device:
+        encoded = {key: value.to(args.device) for key, value in encoded.items()}
+    cfg = BenchmarkConfig(warmup=1, repeats=args.repeats)
+    benchmarks = [
+        benchmark_callable("hf-baseline-forward", lambda: baseline(**encoded), cfg),
+        benchmark_callable("llm-memlab-optimized-forward", lambda: optimized(**encoded), cfg),
+    ]
+    with torch.no_grad():
+        with TorchTrace(baseline) as baseline_trace:
+            _ = baseline(**encoded)
+        with TorchTrace(optimized) as optimized_trace:
+            _ = optimized(**encoded)
+        _, attention_stats = collect_attention_stats(baseline, **encoded)
+    device = next(baseline.parameters()).device
+    dtype = next(baseline.parameters()).dtype
+    q = torch.randn(1, 4, 1, 32, device=device, dtype=dtype if dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float32)
+    k = torch.randn(1, 4, 16, 32, device=device, dtype=q.dtype)
+    v = torch.randn(1, 4, 16, 32, device=device, dtype=q.dtype)
+    kv_quality = evaluate_attention_kv_quality(q, k, v, quant_dtype=args.kv_dtype)
+    info = inspect_model(baseline)
+    policy = choose_memory_policy(max_vram=args.max_vram, model_info=info, sequence_length=getattr(encoded.get("input_ids"), "shape", [None, None])[-1])
+    opt_report = OptimizationReport(
+        title=f"llm-memlab compare: {args.model}",
+        benchmarks=benchmarks,
+        patch_report=patch_report,
+        memory_policy=policy,
+        baseline_trace=baseline_trace,
+        optimized_trace=optimized_trace,
+        kv_quality=kv_quality,
+        attention_stats=attention_stats,
+    )
+    path = write_compare_html(
+        CompareReport(
+            title=f"llm-memlab compare: {args.model}",
+            benchmarks=benchmarks,
+            patch_report=patch_report,
+            baseline_trace=baseline_trace,
+            optimized_trace=optimized_trace,
+            kv_quality=kv_quality,
+            memory_policy=policy,
+            optimization_report=opt_report,
+            attention_stats=attention_stats,
+        ),
+        args.out,
+    )
+    print(opt_report.to_text())
     print(f"Compare HTML report written to {path}")
     return 0
 
@@ -590,6 +758,9 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
+
+
+
 
 
 

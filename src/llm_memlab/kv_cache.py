@@ -143,6 +143,93 @@ class StaticKVCache:
             raise ValueError(f"KV cache capacity exceeded: requested {end}, capacity {self.capacity}")
         return pos, end
 
+class PagedKVCache(StaticKVCache):
+    """Block-based KV cache that stores decode positions in fixed-size pages.
+
+    This is a first allocator step toward vLLM-style paged attention. It keeps the
+    public `append_layer/get_layer` API compatible with StaticKVCache while the
+    backing storage is split into pages, making allocation policy and later page
+    reuse/eviction explicit.
+    """
+
+    def __init__(self, config: KVCacheConfig, *, page_size: int = 16):
+        torch = require_torch()
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
+        self.config = config
+        self.page_size = page_size
+        self.num_pages = (config.max_seq_len + page_size - 1) // page_size
+        dtype = config.dtype or torch.float16
+        shape = (config.num_layers, config.batch_size, config.num_heads, self.num_pages, page_size, config.head_dim)
+        self.keys = torch.empty(shape, device=config.device, dtype=dtype)
+        self.values = torch.empty_like(self.keys)
+        self.length = 0
+
+    @property
+    def capacity(self) -> int:
+        return self.config.max_seq_len
+
+    @property
+    def nbytes(self) -> int:
+        return (self.keys.numel() + self.values.numel()) * self.keys.element_size()
+
+    @property
+    def allocated_pages(self) -> int:
+        if self.length == 0:
+            return 0
+        return (self.length + self.page_size - 1) // self.page_size
+
+    def reset(self) -> None:
+        self.length = 0
+
+    def append_layer(self, layer_idx: int, key, value, position: int | None = None):
+        pos, end = self._validate_append(layer_idx, key, value, position)
+        for token_offset in range(key.shape[-2]):
+            absolute = pos + token_offset
+            page = absolute // self.page_size
+            offset = absolute % self.page_size
+            self.keys[layer_idx, :, :, page, offset, :].copy_(key[:, :, token_offset, :])
+            self.values[layer_idx, :, :, page, offset, :].copy_(value[:, :, token_offset, :])
+        self.length = max(self.length, end)
+        return self.get_layer(layer_idx)
+
+    def get_layer(self, layer_idx: int, end: int | None = None):
+        stop = self.length if end is None else end
+        if stop > self.capacity:
+            raise ValueError(f"requested end {stop} exceeds capacity {self.capacity}")
+        pieces_k = []
+        pieces_v = []
+        remaining = stop
+        for page in range(self.num_pages):
+            if remaining <= 0:
+                break
+            take = min(self.page_size, remaining)
+            pieces_k.append(self.keys[layer_idx, :, :, page, :take, :])
+            pieces_v.append(self.values[layer_idx, :, :, page, :take, :])
+            remaining -= take
+        torch = require_torch()
+        if not pieces_k:
+            empty = torch.empty(
+                self.config.batch_size,
+                self.config.num_heads,
+                0,
+                self.config.head_dim,
+                device=self.config.device,
+                dtype=self.keys.dtype,
+            )
+            return empty, empty.clone()
+        return torch.cat(pieces_k, dim=-2), torch.cat(pieces_v, dim=-2)
+
+    def stats(self) -> KVCacheStats:
+        used_per_layer = self.config.batch_size * self.config.num_heads * self.length * self.config.head_dim
+        used = used_per_layer * self.config.num_layers * 2 * self.keys.element_size()
+        return KVCacheStats(
+            tokens_used=self.length,
+            capacity=self.capacity,
+            bytes_allocated=self.nbytes,
+            bytes_used=used,
+            storage_dtype=f"paged:{str(self.keys.dtype).replace('torch.', '')}:page{self.page_size}",
+        )
 
 class QuantizedStaticKVCache(StaticKVCache):
     """Preallocated KV cache with int/float compressed storage modes.
@@ -444,3 +531,4 @@ def _cache_length(past_key_values) -> int | None:
     if hasattr(first, "shape") and len(first.shape) >= 3:
         return int(first.shape[-2])
     return None
+

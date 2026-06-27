@@ -1,5 +1,6 @@
 """Memory-first LLM analysis toolkit."""
 
+from .attention_debugger import AttentionStats, analyze_qk_attention, attention_stats_to_text, collect_attention_stats
 from .benchmark import BenchmarkConfig, BenchmarkResult, benchmark_callable, benchmark_decode, benchmark_forward, compare_benchmarks
 from .bytes import dtype_size_bytes, format_bytes, parse_bytes
 from .compare_report import CompareReport, compare_report_to_html, write_compare_html
@@ -15,6 +16,7 @@ from .kernels import (
     linear_cross_entropy,
     qkv_rope_attention,
     qkv_rope_attention_cached,
+    quantized_kv_attention,
     rms_norm,
     rms_norm_manual_backward,
     scaled_dot_product_attention,
@@ -29,6 +31,7 @@ from .kv_cache import (
     DecodeConfig,
     DecodeResult,
     KVCacheConfig,
+    PagedKVCache,
     QuantizedStaticKVCache,
     StaticKVCache,
     dequantize_int8_per_token,
@@ -40,6 +43,8 @@ from .kv_cache import (
     sample_next_token,
 )
 from .kv_quality import AttentionKVQualityResult, KVQualityResult, evaluate_attention_kv_quality, evaluate_int8_kv_quality, evaluate_kv_quantization_quality
+from .memory_policy import MemoryPolicy, choose_memory_policy
+from .optimization_report import OptimizationFinding, OptimizationReport, infer_findings
 from .patchers import PackedQKVAttentionAdapter, PatchReport, optimize_hf_model, optimize_llama_qwen_attention
 from .planner import BufferPlan, MemoryPlanner, TensorLifetime
 from .torch_debugger import TorchTrace, trace_forward
@@ -47,6 +52,7 @@ from .triton_kernels import triton_available
 
 __all__ = [
     "AttentionKVQualityResult",
+    "AttentionStats",
     "BenchmarkConfig",
     "BenchmarkResult",
     "BufferPlan",
@@ -59,9 +65,13 @@ __all__ = [
     "KernelConfig",
     "MemoryEstimate",
     "MemoryPlanner",
+    "MemoryPolicy",
     "ModelArchitectureInfo",
     "OperationSpec",
+    "OptimizationFinding",
+    "OptimizationReport",
     "PackedQKVAttentionAdapter",
+    "PagedKVCache",
     "PatchReport",
     "QuantizedStaticKVCache",
     "StaticKVCache",
@@ -69,11 +79,15 @@ __all__ = [
     "TensorSpec",
     "TorchTrace",
     "TransformerConfig",
+    "analyze_qk_attention",
     "apply_rope",
+    "attention_stats_to_text",
     "benchmark_callable",
     "benchmark_decode",
     "benchmark_forward",
+    "choose_memory_policy",
     "chunked_cross_entropy",
+    "collect_attention_stats",
     "compare_benchmarks",
     "compare_report_to_html",
     "dequantize_int8_per_token",
@@ -85,6 +99,7 @@ __all__ = [
     "evaluate_kv_quantization_quality",
     "format_bytes",
     "greedy_decode",
+    "infer_findings",
     "inspect_model",
     "kernel",
     "linear_cross_entropy",
@@ -97,6 +112,7 @@ __all__ = [
     "qkv_rope_attention_cached",
     "quantize_int8_per_token",
     "quantize_uint8_per_token",
+    "quantized_kv_attention",
     "resolve_kv_storage_dtype",
     "rms_norm",
     "rms_norm_manual_backward",

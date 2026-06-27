@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover
 from llm_memlab.kv_cache import (
     DecodeConfig,
     KVCacheConfig,
+    PagedKVCache,
     QuantizedStaticKVCache,
     StaticKVCache,
     dequantize_int8_per_token,
@@ -78,6 +79,18 @@ class KVCacheTests(unittest.TestCase):
                 self.assertEqual(cached_value.dtype, torch.float32)
                 self.assertIn(dtype_name, cache.stats().to_text())
 
+
+    def test_paged_cache_append_and_read(self):
+        cfg = KVCacheConfig(num_layers=1, batch_size=1, num_heads=2, head_dim=4, max_seq_len=5, dtype=torch.float32)
+        cache = PagedKVCache(cfg, page_size=2)
+        key = torch.randn(1, 2, 3, 4)
+        value = torch.randn(1, 2, 3, 4)
+        cached_key, cached_value = cache.append_layer(0, key, value)
+        self.assertEqual(cached_key.shape, key.shape)
+        self.assertTrue(torch.allclose(cached_key, key))
+        self.assertTrue(torch.allclose(cached_value, value))
+        self.assertEqual(cache.allocated_pages, 2)
+        self.assertIn("paged", cache.stats().storage_dtype)
     def test_sample_next_token_greedy(self):
         logits = torch.tensor([[0.1, 2.0, 0.3]])
         token = sample_next_token(logits)
@@ -107,3 +120,4 @@ class KVCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

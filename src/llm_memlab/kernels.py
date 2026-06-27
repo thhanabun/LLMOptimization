@@ -62,6 +62,7 @@ def _registry() -> dict[str, Callable[..., Any]]:
         "triton_quantize_int8_per_token": triton_quantize_int8_per_token,
         "triton_dequantize_int8_per_token": triton_dequantize_int8_per_token,
         "scaled_dot_product_attention": scaled_dot_product_attention,
+        "quantized_kv_attention": quantized_kv_attention,
         "chunked_cross_entropy": chunked_cross_entropy,
         "linear_cross_entropy": linear_cross_entropy,
         "qkv_rope_attention": qkv_rope_attention,
@@ -186,6 +187,29 @@ def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0
         q,
         k,
         v,
+        attn_mask=attn_mask,
+        dropout_p=dropout_p,
+        is_causal=is_causal,
+        scale=scale,
+    )
+
+
+def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None, eps: float = 1e-6):
+    """Attention wrapper that stores K/V through a quantized roundtrip before SDPA.
+
+    This exposes the fused quantized-KV attention contract today with a portable
+    PyTorch implementation. A Triton/CUDA implementation can replace the internal
+    dequant+SDPA path later without changing callers.
+    """
+
+    from .kv_quality import _roundtrip
+
+    k_dequant = _roundtrip(k, quant_dtype=quant_dtype, eps=eps)
+    v_dequant = _roundtrip(v, quant_dtype=quant_dtype, eps=eps)
+    return scaled_dot_product_attention(
+        q,
+        k_dequant,
+        v_dequant,
         attn_mask=attn_mask,
         dropout_p=dropout_p,
         is_causal=is_causal,
@@ -336,4 +360,5 @@ def _expand_rope_cache(cache, target):
     while cache.dim() < target.dim():
         cache = cache.unsqueeze(0)
     return cache.to(device=target.device, dtype=target.dtype)
+
 

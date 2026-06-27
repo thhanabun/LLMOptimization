@@ -315,6 +315,65 @@ print(trace.to_text())
 
 The trace records module runtime, input/output tensor bytes, parameter counts, input/output shapes, activation statistics, CUDA allocator deltas when CUDA is available, NaN/Inf flags, hot layers, and optional gradient statistics.
 
+
+## Memory-First Runtime Policy
+
+Choose an optimization policy from a VRAM budget. The policy recommends KV dtype, static vs paged cache, chunk size, and attention backend tradeoffs:
+
+```powershell
+python -m llm_memlab policy-demo --max-vram 8GB --preset 7b-like --seq 4096
+```
+
+From Python:
+
+```python
+from llm_memlab import choose_memory_policy
+
+policy = choose_memory_policy(max_vram="8GB", model_info=info, sequence_length=4096)
+print(policy.to_text())
+```
+
+## Explainable Optimization Reports
+
+`compare-demo` now writes a single HTML report with benchmark results, patch coverage, trace summary, KV attention quality, memory policy, and inferred findings:
+
+```powershell
+python -m llm_memlab compare-demo --out compare_demo.html --repeats 5 --kv-dtype int8
+```
+
+For cached/local Hugging Face models, compare baseline vs optimized forward passes:
+
+```powershell
+python -m llm_memlab compare-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --out compare_hf.html --local-files-only
+```
+
+## HF Debugger
+
+Trace a Hugging Face causal LM forward pass and collect attention entropy/head statistics:
+
+```powershell
+python -m llm_memlab debug-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --html-out debug.html --local-files-only
+```
+
+The debugger reports layer time, shapes, bytes, activation stats, NaN/Inf flags, hot layers, and attention stats such as entropy, maximum attention probability, and dead-head fraction.
+
+## Paged KV Cache and Quantized Attention
+
+`PagedKVCache` stores decode tokens in fixed-size pages while keeping the same `append_layer/get_layer` API as `StaticKVCache`:
+
+```python
+from llm_memlab import KVCacheConfig, PagedKVCache
+
+cache = PagedKVCache(KVCacheConfig(num_layers=32, batch_size=1, num_heads=32, head_dim=128, max_seq_len=4096), page_size=32)
+```
+
+`quantized_kv_attention` exposes the fused quantized-KV attention contract today through a portable dequant+SDPA implementation. A Triton kernel can later replace the internals without changing callers:
+
+```python
+from llm_memlab import quantized_kv_attention
+
+out = quantized_kv_attention(q, k, v, quant_dtype="int8")
+```
 ## Roadmap
 
 1. Add model importers for Hugging Face transformer blocks.
@@ -322,6 +381,7 @@ The trace records module runtime, input/output tensor bytes, parameter counts, i
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
 
 
 
