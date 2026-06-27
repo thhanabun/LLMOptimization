@@ -33,12 +33,19 @@ class KVCacheStats:
     capacity: int
     bytes_allocated: int
     bytes_used: int
+    reference_bytes: int | None = None
 
     @property
     def utilization(self) -> float:
         if self.capacity == 0:
             return 0.0
         return self.tokens_used / self.capacity
+
+    @property
+    def compression_ratio(self) -> float | None:
+        if self.reference_bytes is None or self.bytes_allocated == 0:
+            return None
+        return self.reference_bytes / self.bytes_allocated
 
     def to_text(self) -> str:
         rows = [
@@ -48,6 +55,10 @@ class KVCacheStats:
             ("Used", format_bytes(self.bytes_used)),
             ("Utilization", f"{self.utilization:.1%}"),
         ]
+        if self.reference_bytes is not None:
+            rows.append(("Reference fp cache", format_bytes(self.reference_bytes)))
+        if self.compression_ratio is not None:
+            rows.append(("Compression", f"{self.compression_ratio:.2f}x"))
         return make_table(("Metric", "Value"), rows)
 
 
@@ -87,13 +98,7 @@ class StaticKVCache:
         self.length = 0
 
     def append_layer(self, layer_idx: int, key, value, position: int | None = None):
-        pos = self.length if position is None else position
-        step = key.shape[-2]
-        end = pos + step
-        if layer_idx < 0 or layer_idx >= self.config.num_layers:
-            raise IndexError(f"layer_idx {layer_idx} is outside 0..{self.config.num_layers - 1}")
-        if end > self.capacity:
-            raise ValueError(f"KV cache capacity exceeded: requested {end}, capacity {self.capacity}")
+        pos, end = self._validate_append(layer_idx, key, value, position)
         self.keys[layer_idx, :, :, pos:end, :].copy_(key)
         self.values[layer_idx, :, :, pos:end, :].copy_(value)
         self.length = max(self.length, end)
@@ -118,6 +123,109 @@ class StaticKVCache:
             bytes_allocated=self.nbytes,
             bytes_used=used,
         )
+
+    def _validate_append(self, layer_idx: int, key, value, position: int | None) -> tuple[int, int]:
+        pos = self.length if position is None else position
+        step = key.shape[-2]
+        end = pos + step
+        if layer_idx < 0 or layer_idx >= self.config.num_layers:
+            raise IndexError(f"layer_idx {layer_idx} is outside 0..{self.config.num_layers - 1}")
+        if key.shape != value.shape:
+            raise ValueError(f"key and value shapes must match, got {tuple(key.shape)} and {tuple(value.shape)}")
+        expected = (self.config.batch_size, self.config.num_heads, step, self.config.head_dim)
+        if tuple(key.shape) != expected:
+            raise ValueError(f"expected K/V shape {expected}, got {tuple(key.shape)}")
+        if end > self.capacity:
+            raise ValueError(f"KV cache capacity exceeded: requested {end}, capacity {self.capacity}")
+        return pos, end
+
+
+class QuantizedStaticKVCache(StaticKVCache):
+    """Int8 KV cache with per-token/per-head scales.
+
+    K/V are stored as int8 plus one scale per [batch, head, token] vector. Reads
+    dequantize to `config.dtype` (or float16 by default) so existing attention
+    code can use the cache without changing its math path.
+    """
+
+    def __init__(self, config: KVCacheConfig, *, scale_dtype=None, eps: float = 1e-6):
+        torch = require_torch()
+        self.config = config
+        self.output_dtype = config.dtype or torch.float16
+        self.scale_dtype = scale_dtype or torch.float16
+        self.eps = eps
+        shape = (config.num_layers, config.batch_size, config.num_heads, config.max_seq_len, config.head_dim)
+        scale_shape = (config.num_layers, config.batch_size, config.num_heads, config.max_seq_len, 1)
+        self.keys = torch.empty(shape, device=config.device, dtype=torch.int8)
+        self.values = torch.empty_like(self.keys)
+        self.key_scales = torch.empty(scale_shape, device=config.device, dtype=self.scale_dtype)
+        self.value_scales = torch.empty_like(self.key_scales)
+        self.length = 0
+
+    @property
+    def nbytes(self) -> int:
+        tensors = (self.keys, self.values, self.key_scales, self.value_scales)
+        return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+
+    @property
+    def reference_nbytes(self) -> int:
+        torch = require_torch()
+        dtype = self.output_dtype or torch.float16
+        element_size = torch.empty((), dtype=dtype).element_size()
+        elements = self.config.num_layers * self.config.batch_size * self.config.num_heads * self.config.max_seq_len * self.config.head_dim * 2
+        return elements * element_size
+
+    def append_layer(self, layer_idx: int, key, value, position: int | None = None):
+        pos, end = self._validate_append(layer_idx, key, value, position)
+        q_key, key_scale = quantize_int8_per_token(key, eps=self.eps)
+        q_value, value_scale = quantize_int8_per_token(value, eps=self.eps)
+        self.keys[layer_idx, :, :, pos:end, :].copy_(q_key)
+        self.values[layer_idx, :, :, pos:end, :].copy_(q_value)
+        self.key_scales[layer_idx, :, :, pos:end, :].copy_(key_scale.to(dtype=self.scale_dtype))
+        self.value_scales[layer_idx, :, :, pos:end, :].copy_(value_scale.to(dtype=self.scale_dtype))
+        self.length = max(self.length, end)
+        return self.get_layer(layer_idx)
+
+    def get_layer(self, layer_idx: int, end: int | None = None):
+        stop = self.length if end is None else end
+        key = dequantize_int8_per_token(
+            self.keys[layer_idx, :, :, :stop, :],
+            self.key_scales[layer_idx, :, :, :stop, :],
+            dtype=self.output_dtype,
+        )
+        value = dequantize_int8_per_token(
+            self.values[layer_idx, :, :, :stop, :],
+            self.value_scales[layer_idx, :, :, :stop, :],
+            dtype=self.output_dtype,
+        )
+        return key, value
+
+    def stats(self) -> KVCacheStats:
+        used_vectors = self.config.num_layers * self.config.batch_size * self.config.num_heads * self.length
+        used_q = used_vectors * self.config.head_dim * 2 * self.keys.element_size()
+        used_scales = used_vectors * 2 * self.key_scales.element_size()
+        return KVCacheStats(
+            tokens_used=self.length,
+            capacity=self.capacity,
+            bytes_allocated=self.nbytes,
+            bytes_used=used_q + used_scales,
+            reference_bytes=self.reference_nbytes,
+        )
+
+
+def quantize_int8_per_token(x, *, eps: float = 1e-6):
+    """Quantize last-dimension vectors to int8 with one absmax scale per vector."""
+
+    torch = require_torch()
+    scale = x.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min(eps) / 127.0
+    q = torch.round(x.float() / scale).clamp(-127, 127).to(torch.int8)
+    return q, scale
+
+
+def dequantize_int8_per_token(q, scale, *, dtype=None):
+    torch = require_torch()
+    out = q.float() * scale.float()
+    return out.to(dtype=dtype or torch.float16)
 
 
 @dataclass(frozen=True)
@@ -173,12 +281,7 @@ class DecodeResult:
 
 
 def greedy_decode(model, input_ids, config: DecodeConfig, **model_kwargs) -> DecodeResult:
-    """Generic HuggingFace-style greedy/sampling decode loop.
-
-    The model may return a dict, an object with `.logits`, or a tuple whose
-    first item is logits. If `past_key_values` is returned, the loop feeds only
-    the newest token on later steps.
-    """
+    """Generic HuggingFace-style greedy/sampling decode loop."""
 
     torch = require_torch()
     sequences = input_ids.clone()

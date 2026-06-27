@@ -9,7 +9,16 @@ try:
 except ImportError:  # pragma: no cover
     torch = None
 
-from llm_memlab.kv_cache import DecodeConfig, KVCacheConfig, StaticKVCache, greedy_decode, sample_next_token
+from llm_memlab.kv_cache import (
+    DecodeConfig,
+    KVCacheConfig,
+    QuantizedStaticKVCache,
+    StaticKVCache,
+    dequantize_int8_per_token,
+    greedy_decode,
+    quantize_int8_per_token,
+    sample_next_token,
+)
 
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
@@ -23,6 +32,29 @@ class KVCacheTests(unittest.TestCase):
         self.assertEqual(cached_value.shape, (1, 3, 2, 4))
         self.assertEqual(cache.length, 2)
         self.assertGreater(cache.stats().bytes_allocated, cache.stats().bytes_used)
+
+    def test_quantize_dequantize_roundtrip(self):
+        x = torch.randn(2, 3, 4, 8)
+        q, scale = quantize_int8_per_token(x)
+        y = dequantize_int8_per_token(q, scale, dtype=torch.float32)
+        self.assertEqual(q.dtype, torch.int8)
+        self.assertEqual(scale.shape, (2, 3, 4, 1))
+        self.assertLess((x - y).abs().mean().item(), 0.02)
+
+    def test_quantized_cache_append_dequantizes_and_compresses(self):
+        cfg = KVCacheConfig(num_layers=2, batch_size=1, num_heads=3, head_dim=16, max_seq_len=8, dtype=torch.float32)
+        cache = QuantizedStaticKVCache(cfg)
+        fp_cache = StaticKVCache(cfg)
+        key = torch.randn(1, 3, 2, 16)
+        value = torch.randn(1, 3, 2, 16)
+        q_key, q_value = cache.append_layer(0, key, value)
+        fp_cache.append_layer(0, key, value)
+        self.assertEqual(q_key.shape, key.shape)
+        self.assertEqual(q_value.shape, value.shape)
+        self.assertEqual(cache.length, 2)
+        self.assertLess(cache.nbytes, fp_cache.nbytes)
+        self.assertGreater(cache.stats().compression_ratio, 1.0)
+        self.assertLess((q_key - key).abs().mean().item(), 0.02)
 
     def test_sample_next_token_greedy(self):
         logits = torch.tensor([[0.1, 2.0, 0.3]])
@@ -53,4 +85,3 @@ class KVCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

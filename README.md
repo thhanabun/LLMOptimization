@@ -65,13 +65,13 @@ The kernel layer provides PyTorch-compatible building blocks for transformer hot
 
 - `rms_norm` with fp32 variance and output dtype preservation.
 - `rms_norm_manual_backward` for compact PyTorch autograd storage during training.
-- Optional `triton_rms_norm`, `triton_apply_rope`, and `triton_swiglu_activation` wrappers with PyTorch fallback.
+- Optional `triton_rms_norm`, `triton_apply_rope`, `triton_swiglu_activation`, and int8 quantize/dequantize hooks with PyTorch fallback.
 - `apply_rope` for interleaved rotary embeddings.
 - `swiglu` for gated MLP blocks.
 - `scaled_dot_product_attention`, dispatching to PyTorch SDPA and FlashAttention-style kernels where available.
 - `chunked_cross_entropy` to reduce loss-time memory spikes on long sequences.
 - `linear_cross_entropy` to compute LM-head projection and CE in chunks without materializing full `[batch, seq, vocab]` logits.
-- `qkv_rope_attention_cached` to write K/V into `StaticKVCache` and attend over cached tokens during decode.
+- `qkv_rope_attention_cached` to write K/V into `StaticKVCache` or `QuantizedStaticKVCache` and attend over cached tokens during decode.
 
 Run a local microbenchmark:
 
@@ -216,6 +216,38 @@ Or via CLI:
 python -m llm_memlab trace-demo --html-out trace_demo.html
 ```
 
+
+### Quantized KV Cache
+
+Use `QuantizedStaticKVCache` to store K/V tensors as int8 with one scale per `[batch, head, token]` vector. Reads dequantize back to the configured dtype, so cache-aware attention can use the same API:
+
+```python
+import torch
+from llm_memlab.kv_cache import KVCacheConfig, QuantizedStaticKVCache
+
+cache = QuantizedStaticKVCache(KVCacheConfig(
+    num_layers=32,
+    batch_size=1,
+    num_heads=32,
+    head_dim=128,
+    max_seq_len=4096,
+    dtype=torch.float16,
+    device="cuda",
+))
+
+k, v = cache.append_layer(layer_idx, k_new, v_new, position=t)
+print(cache.stats().to_text())
+```
+
+Compare fp and quantized cache memory locally:
+
+```powershell
+python -m llm_memlab cache-demo --tokens 128
+python -m llm_memlab cache-demo --tokens 128 --quantized
+```
+
+The int8 cache is lossy but usually much smaller. Compression is below 2x for fp16 because per-token scales are stored alongside K/V.
+
 ## PyTorch Runtime Debugging
 
 ```python
@@ -245,6 +277,7 @@ The trace records module runtime, input/output tensor bytes, parameter counts, i
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
 
 
 

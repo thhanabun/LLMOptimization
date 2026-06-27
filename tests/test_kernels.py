@@ -21,6 +21,8 @@ from llm_memlab.kernels import (
     swiglu,
     triton_apply_rope,
     triton_rms_norm,
+    triton_dequantize_int8_per_token,
+    triton_quantize_int8_per_token,
     triton_swiglu_activation,
 )
 from llm_memlab.kv_cache import KVCacheConfig, StaticKVCache
@@ -96,6 +98,13 @@ class KernelTests(unittest.TestCase):
         expected = torch.nn.functional.silu(gate) * up
         self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6))
 
+    def test_triton_quantize_dequantize_falls_back_on_cpu(self):
+        x = torch.randn(2, 3, 4, 8)
+        q, scale = triton_quantize_int8_per_token(x)
+        y = triton_dequantize_int8_per_token(q, scale, dtype=torch.float32)
+        self.assertEqual(q.dtype, torch.int8)
+        self.assertLess((x - y).abs().mean().item(), 0.02)
+
     def test_chunked_cross_entropy_matches_reference(self):
         logits = torch.randn(2, 5, 11)
         targets = torch.randint(0, 11, (2, 5))
@@ -155,3 +164,4 @@ class KernelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

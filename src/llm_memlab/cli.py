@@ -53,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     decode_parser.add_argument("--steps", type=int, default=6)
     decode_parser.set_defaults(func=_decode_demo)
 
+    cache_parser = subparsers.add_parser("cache-demo", help="Compare fp and quantized KV cache memory on random K/V tensors.")
+    cache_parser.add_argument("--quantized", action="store_true", help="Use QuantizedStaticKVCache instead of fp cache.")
+    cache_parser.add_argument("--tokens", type=int, default=8)
+    cache_parser.set_defaults(func=_cache_demo)
+
     patch_parser = subparsers.add_parser("patch-demo", help="Patch a tiny Hugging Face-style model and print the patch report.")
     patch_parser.set_defaults(func=_patch_demo)
 
@@ -231,6 +236,27 @@ def _decode_demo(args: argparse.Namespace) -> int:
 
 
 
+
+
+def _cache_demo(args: argparse.Namespace) -> int:
+    try:
+        import torch
+    except ImportError:
+        print("PyTorch is not installed. Install it to run cache-demo: pip install torch")
+        return 2
+
+    from .kv_cache import KVCacheConfig, QuantizedStaticKVCache, StaticKVCache
+
+    cfg = KVCacheConfig(num_layers=4, batch_size=1, num_heads=8, head_dim=64, max_seq_len=max(args.tokens, 1), dtype=torch.float16)
+    cache = QuantizedStaticKVCache(cfg) if args.quantized else StaticKVCache(cfg)
+    for pos in range(args.tokens):
+        key = torch.randn(1, 8, 1, 64, dtype=torch.float16)
+        value = torch.randn(1, 8, 1, 64, dtype=torch.float16)
+        for layer in range(cfg.num_layers):
+            cache.append_layer(layer, key, value, position=pos)
+    print(cache.stats().to_text())
+    return 0
+
 def _patch_demo(args: argparse.Namespace) -> int:
     try:
         import torch
@@ -342,6 +368,7 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
+
 
 
 

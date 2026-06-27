@@ -24,9 +24,11 @@ from .kernels import (
     swiglu,
     triton_apply_rope,
     triton_rms_norm,
+    triton_dequantize_int8_per_token,
+    triton_quantize_int8_per_token,
     triton_swiglu_activation,
 )
-from .kv_cache import DecodeConfig, DecodeResult, KVCacheConfig, StaticKVCache, greedy_decode, sample_next_token
+from .kv_cache import DecodeConfig, DecodeResult, KVCacheConfig, QuantizedStaticKVCache, StaticKVCache, dequantize_int8_per_token, greedy_decode, quantize_int8_per_token, sample_next_token
 from .patchers import PatchReport, optimize_hf_model
 from .planner import BufferPlan, MemoryPlanner, TensorLifetime
 from .torch_debugger import TorchTrace, trace_forward
@@ -45,6 +47,7 @@ __all__ = [
     "MemoryPlanner",
     "OperationSpec",
     "PatchReport",
+    "QuantizedStaticKVCache",
     "StaticKVCache",
     "TensorLifetime",
     "TensorSpec",
@@ -59,6 +62,7 @@ __all__ = [
     "dtype_size_bytes",
     "estimate_transformer_memory",
     "format_bytes",
+    "dequantize_int8_per_token",
     "greedy_decode",
     "kernel",
     "linear_cross_entropy",
@@ -69,14 +73,18 @@ __all__ = [
     "qkv_rope_attention_cached",
     "rms_norm",
     "rms_norm_manual_backward",
+    "quantize_int8_per_token",
     "sample_next_token",
     "scaled_dot_product_attention",
     "swiglu",
     "trace_forward",
     "trace_to_html",
     "triton_apply_rope",
+    "triton_dequantize_int8_per_token",
     "triton_available",
+    "triton_quantize_int8_per_token",
     "triton_rms_norm",
     "triton_swiglu_activation",
     "write_trace_html",
 ]
+

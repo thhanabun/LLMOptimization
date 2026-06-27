@@ -59,6 +59,8 @@ def _registry() -> dict[str, Callable[..., Any]]:
         "triton_apply_rope": triton_apply_rope,
         "swiglu": swiglu,
         "triton_swiglu_activation": triton_swiglu_activation,
+        "triton_quantize_int8_per_token": triton_quantize_int8_per_token,
+        "triton_dequantize_int8_per_token": triton_dequantize_int8_per_token,
         "scaled_dot_product_attention": scaled_dot_product_attention,
         "chunked_cross_entropy": chunked_cross_entropy,
         "linear_cross_entropy": linear_cross_entropy,
@@ -162,6 +164,18 @@ def triton_swiglu_activation(gate, up):
     from .triton_kernels import triton_swiglu_activation as _triton_swiglu_activation
 
     return _triton_swiglu_activation(gate, up)
+
+
+def triton_quantize_int8_per_token(x, *, eps: float = 1e-6):
+    from .triton_kernels import triton_quantize_int8_per_token as _triton_quantize_int8_per_token
+
+    return _triton_quantize_int8_per_token(x, eps=eps)
+
+
+def triton_dequantize_int8_per_token(q, scale, *, dtype=None):
+    from .triton_kernels import triton_dequantize_int8_per_token as _triton_dequantize_int8_per_token
+
+    return _triton_dequantize_int8_per_token(q, scale, dtype=dtype)
 
 
 def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None):
@@ -322,3 +336,4 @@ def _expand_rope_cache(cache, target):
     while cache.dim() < target.dim():
         cache = cache.unsqueeze(0)
     return cache.to(device=target.device, dtype=target.dtype)
+
