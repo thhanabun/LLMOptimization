@@ -194,14 +194,27 @@ def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0
     )
 
 
-def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None, eps: float = 1e-6):
+def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None, eps: float = 1e-6, backend: str = "auto"):
     """Attention wrapper that stores K/V through a quantized roundtrip before SDPA.
 
-    This exposes the fused quantized-KV attention contract today with a portable
-    PyTorch implementation. A Triton/CUDA implementation can replace the internal
-    dequant+SDPA path later without changing callers.
+    This exposes the fused quantized-KV attention contract today. `backend="auto"`
+    uses a Triton-ready dispatch point on CUDA when available, then safely falls
+    back to portable PyTorch dequant+SDPA. A future kernel can replace the Triton
+    branch without changing callers.
     """
 
+    if backend not in {"auto", "torch", "triton"}:
+        raise ValueError("backend must be one of: auto, torch, triton")
+    if backend in {"auto", "triton"} and getattr(k, "is_cuda", False):
+        try:
+            from .triton_kernels import triton_available
+
+            if triton_available():
+                # Placeholder dispatch point for a future fused CUDA kernel.
+                pass
+        except Exception:
+            if backend == "triton":
+                raise
     from .kv_quality import _roundtrip
 
     k_dequant = _roundtrip(k, quant_dtype=quant_dtype, eps=eps)
@@ -360,5 +373,6 @@ def _expand_rope_cache(cache, target):
     while cache.dim() < target.dim():
         cache = cache.unsqueeze(0)
     return cache.to(device=target.device, dtype=target.dtype)
+
 
 

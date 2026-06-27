@@ -77,6 +77,22 @@ class PatcherTests(unittest.TestCase):
         self.assertIsInstance(model.self_attn, PackedQKVAttentionAdapter)
         self.assertEqual(model(torch.randn(2, 3, 8)).shape, (2, 3, 8))
 
+
+    def test_attention_patch_supports_gqa_layout(self):
+        class TinyQwenAttention(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.num_heads = 4
+                self.head_dim = 2
+                self.q_proj = torch.nn.Linear(8, 8, bias=False)
+                self.k_proj = torch.nn.Linear(8, 4, bias=False)
+                self.v_proj = torch.nn.Linear(8, 4, bias=False)
+                self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        model = torch.nn.Sequential(TinyQwenAttention())
+        _, report = optimize_llama_qwen_attention(model)
+        self.assertEqual(report.patched_attentions, 1)
+        self.assertEqual(model[0](torch.randn(1, 3, 8)).shape, (1, 3, 8))
     def test_attention_helper_only_patches_attention(self):
         class TinyQwenAttention(torch.nn.Module):
             def __init__(self):
@@ -107,3 +123,4 @@ class PatcherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

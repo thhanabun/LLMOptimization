@@ -164,6 +164,8 @@ class PagedKVCache(StaticKVCache):
         self.keys = torch.empty(shape, device=config.device, dtype=dtype)
         self.values = torch.empty_like(self.keys)
         self.length = 0
+        self._page_table: list[int] = []
+        self._free_pages: list[int] = list(range(self.num_pages - 1, -1, -1))
 
     @property
     def capacity(self) -> int:
@@ -175,21 +177,59 @@ class PagedKVCache(StaticKVCache):
 
     @property
     def allocated_pages(self) -> int:
-        if self.length == 0:
-            return 0
-        return (self.length + self.page_size - 1) // self.page_size
+        return len(self._page_table)
+
+    @property
+    def free_pages(self) -> int:
+        return len(self._free_pages)
+
+    @property
+    def page_table(self) -> tuple[int, ...]:
+        return tuple(self._page_table)
+
+    @property
+    def fragmentation(self) -> float:
+        if not self._page_table:
+            return 0.0
+        used_slots = self.length
+        allocated_slots = len(self._page_table) * self.page_size
+        return 1.0 - (used_slots / allocated_slots) if allocated_slots else 0.0
 
     def reset(self) -> None:
         self.length = 0
+        self._free_pages.extend(reversed(self._page_table))
+        self._page_table.clear()
+
+    def release_pages(self, count: int | None = None) -> int:
+        """Release pages from the tail and return how many pages were freed."""
+
+        if count is None:
+            count = len(self._page_table)
+        count = max(0, min(count, len(self._page_table)))
+        for _ in range(count):
+            self._free_pages.append(self._page_table.pop())
+        self.length = min(self.length, len(self._page_table) * self.page_size)
+        return count
+
+    def fragmentation_report(self) -> str:
+        rows = [
+            ("Allocated pages", self.allocated_pages),
+            ("Free pages", self.free_pages),
+            ("Page size", self.page_size),
+            ("Fragmentation", f"{self.fragmentation:.1%}"),
+        ]
+        return make_table(("Metric", "Value"), rows)
 
     def append_layer(self, layer_idx: int, key, value, position: int | None = None):
         pos, end = self._validate_append(layer_idx, key, value, position)
         for token_offset in range(key.shape[-2]):
             absolute = pos + token_offset
-            page = absolute // self.page_size
+            logical_page = absolute // self.page_size
+            self._ensure_logical_page(logical_page)
+            physical_page = self._page_table[logical_page]
             offset = absolute % self.page_size
-            self.keys[layer_idx, :, :, page, offset, :].copy_(key[:, :, token_offset, :])
-            self.values[layer_idx, :, :, page, offset, :].copy_(value[:, :, token_offset, :])
+            self.keys[layer_idx, :, :, physical_page, offset, :].copy_(key[:, :, token_offset, :])
+            self.values[layer_idx, :, :, physical_page, offset, :].copy_(value[:, :, token_offset, :])
         self.length = max(self.length, end)
         return self.get_layer(layer_idx)
 
@@ -204,8 +244,9 @@ class PagedKVCache(StaticKVCache):
             if remaining <= 0:
                 break
             take = min(self.page_size, remaining)
-            pieces_k.append(self.keys[layer_idx, :, :, page, :take, :])
-            pieces_v.append(self.values[layer_idx, :, :, page, :take, :])
+            physical_page = self._page_table[page]
+            pieces_k.append(self.keys[layer_idx, :, :, physical_page, :take, :])
+            pieces_v.append(self.values[layer_idx, :, :, physical_page, :take, :])
             remaining -= take
         torch = require_torch()
         if not pieces_k:
@@ -228,8 +269,14 @@ class PagedKVCache(StaticKVCache):
             capacity=self.capacity,
             bytes_allocated=self.nbytes,
             bytes_used=used,
-            storage_dtype=f"paged:{str(self.keys.dtype).replace('torch.', '')}:page{self.page_size}",
+            storage_dtype=f"paged:{str(self.keys.dtype).replace('torch.', '')}:page{self.page_size}:free{self.free_pages}",
         )
+
+    def _ensure_logical_page(self, logical_page: int) -> None:
+        while len(self._page_table) <= logical_page:
+            if not self._free_pages:
+                raise ValueError("Paged KV cache has no free pages left")
+            self._page_table.append(self._free_pages.pop())
 
 class QuantizedStaticKVCache(StaticKVCache):
     """Preallocated KV cache with int/float compressed storage modes.
@@ -531,4 +578,5 @@ def _cache_length(past_key_values) -> int | None:
     if hasattr(first, "shape") and len(first.shape) >= 3:
         return int(first.shape[-2])
     return None
+
 

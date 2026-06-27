@@ -163,3 +163,60 @@ def _attention_stats_html(attention_stats: tuple[Any, ...]) -> str:
         for item in attention_stats
     )
     return "<section><h2>Attention debugger</h2><table><thead><tr><th>Layer</th><th>Entropy</th><th>Max prob</th><th>Dead heads</th><th>Shape</th></tr></thead><tbody>" + rows + "</tbody></table></section>"
+
+
+def scoreboard_to_html(rows: list[dict[str, Any]], *, title: str = "llm-memlab scoreboard") -> str:
+    body = []
+    for row in rows:
+        body.append(
+            "<tr>"
+            f"<td>{_e(row.get('model', ''))}</td>"
+            f"<td>{_e(row.get('status', ''))}</td>"
+            f"<td>{_fmt_num(row.get('baseline_ms'))}</td>"
+            f"<td>{_fmt_num(row.get('optimized_ms'))}</td>"
+            f"<td>{_fmt_speed(row.get('speedup'))}</td>"
+            f"<td>{_e(row.get('patched', ''))}</td>"
+            f"<td>{_e(row.get('params', ''))}</td>"
+            "</tr>"
+        )
+    return f"""<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<title>{_e(title)}</title>
+<style>
+body {{ font-family: Segoe UI, Arial, sans-serif; margin:24px; color:#17202a; }}
+table {{ border-collapse:collapse; width:100%; font-size:13px; }}
+th, td {{ border-bottom:1px solid #e5e9f0; padding:8px; text-align:left; }}
+th {{ background:#f6f8fb; }}
+</style>
+</head>
+<body>
+<h1>{_e(title)}</h1>
+<table><thead><tr><th>Model</th><th>Status</th><th>Baseline ms</th><th>Optimized ms</th><th>Speed</th><th>Patched</th><th>Params</th></tr></thead><tbody>{''.join(body)}</tbody></table>
+</body>
+</html>"""
+
+
+def write_scoreboard_html(rows: list[dict[str, Any]], path: str | Path, *, title: str = "llm-memlab scoreboard") -> Path:
+    output = Path(path)
+    output.write_text(scoreboard_to_html(rows, title=title), encoding="utf-8")
+    return output
+
+
+def _fmt_num(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{float(value):.3f}"
+    except Exception:
+        return _e(value)
+
+
+def _fmt_speed(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{float(value):.2f}x"
+    except Exception:
+        return _e(value)

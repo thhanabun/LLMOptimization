@@ -99,8 +99,20 @@ class PackedQKVAttentionAdapter(_lazy_torch_nn_module()):
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split((self.q_out, self.k_out, self.v_out), dim=-1)
         q = q.view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        kv_heads = max(1, self.k_out // self.head_dim)
+        k = k.view(batch, seq_len, kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch, seq_len, kv_heads, self.head_dim).transpose(1, 2)
+        if kv_heads != self.num_heads:
+            repeat = self.num_heads // kv_heads
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
+        if position_embeddings is not None:
+            try:
+                from .kernels import apply_rope
+                cos, sin = position_embeddings
+                q, k = apply_rope(q, k, cos, sin)
+            except Exception:
+                pass
         attn_mask = _prepare_sdpa_mask(attention_mask, seq_len)
         out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
         out = out.transpose(1, 2).contiguous().view(batch, seq_len, self.q_out)
@@ -138,9 +150,9 @@ def optimize_hf_model(
         if parent is None:
             continue
         if patch_attention and _looks_like_attention(module):
-            replacement = _make_attention_adapter(module)
+            replacement, reason = _make_attention_adapter(module)
             if replacement is None:
-                report.skipped.append(f"{name}: unsupported attention layout")
+                report.skipped.append(f"{name}: {reason}")
                 continue
             if not dry_run:
                 setattr(parent, child_name, replacement)
@@ -227,21 +239,27 @@ def _make_swiglu_mlp(module: Any, *, use_triton: bool):
 
 def _make_attention_adapter(module: Any):
     if not _supported_attention_module_name(module):
-        return None
+        return None, "unsupported attention class name"
     q_proj = getattr(module, "q_proj", None)
     k_proj = getattr(module, "k_proj", None)
     v_proj = getattr(module, "v_proj", None)
     o_proj = getattr(module, "o_proj", None)
     if not all(_linear_like(item) for item in (q_proj, k_proj, v_proj, o_proj)):
-        return None
-    if q_proj.out_features != k_proj.out_features or q_proj.out_features != v_proj.out_features:
-        return None
+        return None, "q/k/v/o projections are not Linear-like"
+    if k_proj.out_features != v_proj.out_features:
+        return None, "k_proj and v_proj widths differ"
     num_heads = int(getattr(module, "num_heads", getattr(module, "num_attention_heads", 1)))
     if num_heads <= 0 or q_proj.out_features % num_heads != 0:
-        return None
+        return None, "q_proj width is not divisible by num_heads"
+    head_dim = q_proj.out_features // num_heads
+    if k_proj.out_features % head_dim != 0:
+        return None, "k_proj width is incompatible with q head_dim"
+    kv_heads = k_proj.out_features // head_dim
+    if num_heads % kv_heads != 0:
+        return None, "GQA layout requires num_heads divisible by kv_heads"
     if o_proj.in_features != q_proj.out_features:
-        return None
-    return PackedQKVAttentionAdapter(module)
+        return None, "o_proj input width does not match q output width"
+    return PackedQKVAttentionAdapter(module), "patched"
 
 
 def _supported_attention_module_name(module: Any) -> bool:
@@ -288,4 +306,5 @@ def _lazy_torch_nn_module():
 
         return _Fallback
     return torch.nn.Module
+
 

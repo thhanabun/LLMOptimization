@@ -160,17 +160,22 @@ class KernelTests(unittest.TestCase):
         q = torch.randn(1, 2, 1, 8)
         k = torch.randn(1, 2, 4, 8)
         v = torch.randn(1, 2, 4, 8)
-        out = quantized_kv_attention(q, k, v, quant_dtype="int8")
+        out = quantized_kv_attention(q, k, v, quant_dtype="int8", backend="auto")
         self.assertEqual(out.shape, q.shape)
+        with self.assertRaises(ValueError):
+            quantized_kv_attention(q, k, v, backend="bad")
     def test_sdpa_preserves_shape(self):
         q = torch.randn(2, 4, 8, 16)
         k = torch.randn(2, 4, 8, 16)
         v = torch.randn(2, 4, 8, 16)
         out = scaled_dot_product_attention(q, k, v, is_causal=True)
         self.assertEqual(out.shape, q.shape)
+        with self.assertRaises(ValueError):
+            quantized_kv_attention(q, k, v, backend="bad")
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

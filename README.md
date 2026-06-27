@@ -374,6 +374,63 @@ from llm_memlab import quantized_kv_attention
 
 out = quantized_kv_attention(q, k, v, quant_dtype="int8")
 ```
+
+## HF Scoreboard and Memory-Budget Run
+
+Benchmark one or more cached Hugging Face models and write a scoreboard HTML report:
+
+```powershell
+python -m llm_memlab scoreboard-hf --models Qwen/Qwen2.5-0.5B TinyLlama/TinyLlama-1.1B-Chat-v1.0 --prompt "Hello" --out scoreboard_hf.html --local-files-only
+```
+
+Run generation with a memory-first policy summary before the decoded text:
+
+```powershell
+python -m llm_memlab run-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --tokens 32 --max-vram 8GB --local-files-only
+```
+
+## Timeline Debugger
+
+The debugger can now write a timeline-style HTML view in addition to the table report:
+
+```powershell
+python -m llm_memlab trace-demo --timeline-out trace_timeline.html
+python -m llm_memlab debug-hf --model Qwen/Qwen2.5-0.5B --prompt "Hello" --timeline-out debug_timeline.html --local-files-only
+```
+
+## Paged KV Cache v2
+
+`PagedKVCache` now tracks a logical page table, free pages, tail-page release, and fragmentation:
+
+```python
+from llm_memlab import KVCacheConfig, PagedKVCache
+
+cache = PagedKVCache(KVCacheConfig(num_layers=1, batch_size=1, num_heads=8, head_dim=64, max_seq_len=4096), page_size=32)
+print(cache.page_table)
+print(cache.fragmentation_report())
+cache.release_pages(1)
+```
+
+## Attention Patcher v2
+
+The opt-in attention patcher now supports simple GQA/MQA-style layouts where K/V have fewer heads than Q, repeats K/V heads for SDPA, accepts tuple `position_embeddings=(cos, sin)` for RoPE best-effort application, and reports clearer skip reasons.
+
+```python
+from llm_memlab import optimize_llama_qwen_attention
+
+model, report = optimize_llama_qwen_attention(model)
+print(report.to_text())
+```
+
+## Quantized Attention Backend Selector
+
+`quantized_kv_attention` now accepts `backend="auto" | "torch" | "triton"`. The current implementation is a Triton-ready dispatch surface with a portable PyTorch dequant+SDPA fallback.
+
+```python
+from llm_memlab import quantized_kv_attention
+
+out = quantized_kv_attention(q, k, v, quant_dtype="int8", backend="auto")
+```
 ## Roadmap
 
 1. Add model importers for Hugging Face transformer blocks.
@@ -381,6 +438,7 @@ out = quantized_kv_attention(q, k, v, quant_dtype="int8")
 3. Add graph rewrites for activation checkpointing and CPU/NVMe offload.
 4. Add a `torch.compile` backend that consumes this IR.
 5. Add a browser timeline for tensor lifetimes and allocator snapshots.
+
 
 
 

@@ -41,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     trace_parser = subparsers.add_parser("trace-demo", help="Trace a tiny PyTorch model if torch is installed.")
     trace_parser.add_argument("--all-modules", action="store_true", help="Record container modules as well as leaf modules.")
     trace_parser.add_argument("--html-out", help="Write an interactive-ish HTML layer report to this path.")
+    trace_parser.add_argument("--timeline-out", help="Write a timeline-style HTML report to this path.")
     trace_parser.set_defaults(func=_trace_demo)
 
     kernel_parser = subparsers.add_parser("kernel-demo", help="Run correctness checks and microbenchmarks for optimized kernels.")
@@ -86,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     debug_hf_parser.add_argument("--device")
     debug_hf_parser.add_argument("--dtype", default="auto")
     debug_hf_parser.add_argument("--html-out")
+    debug_hf_parser.add_argument("--timeline-out")
     debug_hf_parser.add_argument("--local-files-only", action="store_true")
     debug_hf_parser.set_defaults(func=_debug_hf)
 
@@ -100,6 +102,26 @@ def main(argv: list[str] | None = None) -> int:
     compare_hf_parser.add_argument("--kv-dtype", default="int8")
     compare_hf_parser.add_argument("--local-files-only", action="store_true")
     compare_hf_parser.set_defaults(func=_compare_hf)
+
+    scoreboard_hf_parser = subparsers.add_parser("scoreboard-hf", help="Benchmark one or more HF models and write an optimization scoreboard.")
+    scoreboard_hf_parser.add_argument("--models", nargs="+", required=True)
+    scoreboard_hf_parser.add_argument("--prompt", default="Hello")
+    scoreboard_hf_parser.add_argument("--out", default="scoreboard_hf.html")
+    scoreboard_hf_parser.add_argument("--repeats", type=int, default=1)
+    scoreboard_hf_parser.add_argument("--device")
+    scoreboard_hf_parser.add_argument("--dtype", default="auto")
+    scoreboard_hf_parser.add_argument("--local-files-only", action="store_true")
+    scoreboard_hf_parser.set_defaults(func=_scoreboard_hf)
+
+    run_hf_parser = subparsers.add_parser("run-hf", help="Run HF generation with a memory-first policy report.")
+    run_hf_parser.add_argument("--model", required=True)
+    run_hf_parser.add_argument("--prompt", default="Hello")
+    run_hf_parser.add_argument("--tokens", type=int, default=16)
+    run_hf_parser.add_argument("--max-vram", default="8GB")
+    run_hf_parser.add_argument("--device")
+    run_hf_parser.add_argument("--dtype", default="auto")
+    run_hf_parser.add_argument("--local-files-only", action="store_true")
+    run_hf_parser.set_defaults(func=_run_hf)
     inspect_demo_parser = subparsers.add_parser("inspect-demo", help="Inspect a tiny local HF-style model.")
     inspect_demo_parser.set_defaults(func=_inspect_demo)
 
@@ -198,6 +220,11 @@ def _trace_demo(args: argparse.Namespace) -> int:
 
         path = write_trace_html(trace, args.html_out, title="llm-memlab trace demo")
         print(f"HTML report written to {path}")
+    if args.timeline_out:
+        from .html_report import write_timeline_html
+
+        path = write_timeline_html(trace, args.timeline_out, title="llm-memlab trace timeline")
+        print(f"Timeline report written to {path}")
     return 0
     return 0
 
@@ -532,6 +559,11 @@ def _debug_hf(args: argparse.Namespace) -> int:
     if args.html_out:
         path = write_trace_html(trace, args.html_out, title=f"llm-memlab debug: {args.model}")
         print(f"HTML trace written to {path}")
+    if args.timeline_out:
+        from .html_report import write_timeline_html
+
+        path = write_timeline_html(trace, args.timeline_out, title=f"llm-memlab timeline: {args.model}")
+        print(f"Timeline report written to {path}")
     return 0
 
 
@@ -611,6 +643,95 @@ def _compare_hf(args: argparse.Namespace) -> int:
     print(opt_report.to_text())
     print(f"Compare HTML report written to {path}")
     return 0
+
+
+def _scoreboard_hf(args: argparse.Namespace) -> int:
+    try:
+        import torch
+        from transformers import AutoTokenizer
+    except ImportError:
+        print("scoreboard-hf requires: pip install torch transformers")
+        return 2
+
+    from .benchmark import BenchmarkConfig, benchmark_callable
+    from .compare_report import scoreboard_to_html, write_scoreboard_html
+    from .inspector import inspect_model, load_hf_model
+    from .patchers import optimize_hf_model
+    from .report import make_table
+
+    rows = []
+    cfg = BenchmarkConfig(warmup=1, repeats=args.repeats)
+    for model_name in args.models:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=args.local_files_only)
+            baseline = load_hf_model(model_name, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+            optimized = load_hf_model(model_name, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+            _, patch_report = optimize_hf_model(optimized)
+            encoded = tokenizer(args.prompt, return_tensors="pt")
+            if args.device:
+                encoded = {key: value.to(args.device) for key, value in encoded.items()}
+            baseline_bench = benchmark_callable(f"{model_name}:baseline", lambda: baseline(**encoded), cfg)
+            optimized_bench = benchmark_callable(f"{model_name}:optimized", lambda: optimized(**encoded), cfg)
+            info = inspect_model(baseline)
+            speedup = baseline_bench.mean_ms / optimized_bench.mean_ms if optimized_bench.mean_ms else 0.0
+            rows.append({
+                "model": model_name,
+                "baseline_ms": baseline_bench.mean_ms,
+                "optimized_ms": optimized_bench.mean_ms,
+                "speedup": speedup,
+                "patched": patch_report.total_patched,
+                "params": info.parameter_count,
+                "status": "ok",
+            })
+        except Exception as exc:
+            rows.append({"model": model_name, "status": f"error: {exc}"})
+    print(make_table(("Model", "Status", "Base ms", "Opt ms", "Speed", "Patched"), [
+        (row.get("model"), row.get("status"), _fmt_float(row.get("baseline_ms")), _fmt_float(row.get("optimized_ms")), _fmt_speed(row.get("speedup")), row.get("patched", ""))
+        for row in rows
+    ]))
+    path = write_scoreboard_html(rows, args.out, title="llm-memlab HF scoreboard")
+    print(f"Scoreboard HTML written to {path}")
+    return 0
+
+
+def _run_hf(args: argparse.Namespace) -> int:
+    try:
+        import torch
+        from transformers import AutoTokenizer
+    except ImportError:
+        print("run-hf requires: pip install torch transformers")
+        return 2
+
+    from .inspector import inspect_model, load_hf_model
+    from .memory_policy import choose_memory_policy
+    from .patchers import optimize_hf_model
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=args.local_files_only)
+        model = load_hf_model(args.model, device=args.device, dtype=args.dtype, local_files_only=args.local_files_only)
+    except Exception as exc:
+        print(f"Could not load Hugging Face model/tokenizer: {exc}")
+        return 2
+    info = inspect_model(model)
+    policy = choose_memory_policy(max_vram=args.max_vram, model_info=info, sequence_length=len(tokenizer(args.prompt).input_ids))
+    optimize_hf_model(model)
+    encoded = tokenizer(args.prompt, return_tensors="pt")
+    if args.device:
+        encoded = {key: value.to(args.device) for key, value in encoded.items()}
+    with torch.no_grad():
+        output_ids = model.generate(**encoded, max_new_tokens=args.tokens, do_sample=False)
+    print(policy.to_text())
+    print("")
+    print(tokenizer.decode(output_ids[0], skip_special_tokens=True))
+    return 0
+
+
+def _fmt_float(value) -> str:
+    return "" if value is None else f"{value:.3f}"
+
+
+def _fmt_speed(value) -> str:
+    return "" if value is None else f"{value:.2f}x"
 
 def _inspect_demo(args: argparse.Namespace) -> int:
     try:
@@ -758,6 +879,8 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
+
+
 
 
 

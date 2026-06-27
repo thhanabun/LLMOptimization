@@ -3,9 +3,9 @@
 from .attention_debugger import AttentionStats, analyze_qk_attention, attention_stats_to_text, collect_attention_stats
 from .benchmark import BenchmarkConfig, BenchmarkResult, benchmark_callable, benchmark_decode, benchmark_forward, compare_benchmarks
 from .bytes import dtype_size_bytes, format_bytes, parse_bytes
-from .compare_report import CompareReport, compare_report_to_html, write_compare_html
+from .compare_report import CompareReport, compare_report_to_html, scoreboard_to_html, write_compare_html, write_scoreboard_html
 from .estimates import MemoryEstimate, TransformerConfig, estimate_transformer_memory, preset_config
-from .html_report import trace_to_html, write_trace_html
+from .html_report import trace_timeline_to_html, trace_to_html, write_timeline_html, write_trace_html
 from .inspector import ModelArchitectureInfo, inspect_model, load_hf_model
 from .ir import GraphSpec, OperationSpec, TensorSpec
 from .kernels import (
@@ -117,6 +117,10 @@ __all__ = [
     "rms_norm",
     "rms_norm_manual_backward",
     "sample_next_token",
+    "scoreboard_to_html",
+    "trace_timeline_to_html",
+    "write_scoreboard_html",
+    "write_timeline_html",
     "scaled_dot_product_attention",
     "swiglu",
     "trace_forward",
@@ -130,3 +134,4 @@ __all__ = [
     "write_compare_html",
     "write_trace_html",
 ]
+
