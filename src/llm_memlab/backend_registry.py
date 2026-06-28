@@ -48,10 +48,19 @@ class BackendRegistry:
 
 def default_backend_registry() -> BackendRegistry:
     registry = BackendRegistry()
-    registry.register("torch", lambda: (True, "always available when llm_memlab is imported"), priority=10)
+    registry.register("torch", _check_torch, priority=10)
     registry.register("triton", _check_triton, priority=30)
     registry.register("cuda", _check_cuda, priority=20)
     return registry
+
+
+def _check_torch() -> tuple[bool, str]:
+    try:
+        import torch
+
+        return True, f"torch {torch.__version__}"
+    except Exception as exc:
+        return False, str(exc)
 
 
 def _check_triton() -> tuple[bool, str]:

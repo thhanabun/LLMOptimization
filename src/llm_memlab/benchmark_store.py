@@ -29,6 +29,8 @@ def records_from_suite(result: InferenceSuiteResult) -> list[BenchmarkRecord]:
     records: list[BenchmarkRecord] = []
     if result.prefill is not None:
         records.append(record_from_benchmark(result.prefill, kind="prefill"))
+    if result.decode is not None:
+        records.append(record_from_benchmark(result.decode, kind="decode"))
     if result.generate is not None:
         rec = record_from_benchmark(result.generate, kind="generate")
         rec.extra.update({"prefill_tok_s": result.prefill_tokens_per_second, "decode_tok_s": result.decode_tokens_per_second})

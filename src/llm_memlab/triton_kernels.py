@@ -294,6 +294,142 @@ def triton_dequantize_uint8_per_token(q, scale, zero_point, *, dtype=None):
     return out.view(original_shape)
 
 
+def triton_fused_int8_kv_attention(q, k_q, k_scale, v_q, v_scale, *, scale=None, is_causal: bool = False):
+    """Decode attention that dequantizes int8 K/V inside a Triton softmax kernel.
+
+    Supported fast path: q [B,H,1,D], quantized K/V [B,H,T,D], per-token
+    scales [B,H,T,1]. Other layouts fall back to dequantize+SDPA.
+    """
+
+    torch = require_torch()
+    if not _supports_fused_decode(q, k_q, v_q, k_scale, v_scale):
+        from .kv_cache import dequantize_int8_per_token
+
+        k = dequantize_int8_per_token(k_q, k_scale, dtype=q.dtype)
+        v = dequantize_int8_per_token(v_q, v_scale, dtype=q.dtype)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
+
+    import triton
+    import triton.language as tl
+
+    q_c = q.contiguous()
+    k_c = k_q.contiguous()
+    v_c = v_q.contiguous()
+    ks_c = k_scale.contiguous()
+    vs_c = v_scale.contiguous()
+    batch, heads, _, dim = q_c.shape
+    tokens = k_c.shape[-2]
+    block_d = triton.next_power_of_2(dim)
+    block_t = triton.next_power_of_2(tokens)
+    if block_d > 256 or block_t > 4096:
+        from .kv_cache import dequantize_int8_per_token
+
+        k = dequantize_int8_per_token(k_q, k_scale, dtype=q.dtype)
+        v = dequantize_int8_per_token(v_q, v_scale, dtype=q.dtype)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
+    out = torch.empty_like(q_c)
+    sm_scale = float(scale) if scale is not None else dim ** -0.5
+
+    @triton.jit
+    def _kernel(Q, KQ, KS, VQ, VS, O, T: tl.constexpr, D: tl.constexpr, SM: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr):
+        row = tl.program_id(0)
+        offs_t = tl.arange(0, BT)
+        offs_d = tl.arange(0, BD)
+        row_td = row * T * D
+        row_t = row * T
+        q_vals = tl.load(Q + row * D + offs_d, mask=offs_d < D, other=0.0).to(tl.float32)
+        k_vals = tl.load(KQ + row_td + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0).to(tl.float32)
+        k_scales = tl.load(KS + row_t + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
+        scores = tl.sum(q_vals[None, :] * k_vals * k_scales[:, None], axis=1) * SM
+        scores = tl.where(offs_t < T, scores, -3.4028234663852886e38)
+        scores = scores - tl.max(scores, axis=0)
+        probs = tl.exp(scores)
+        denom = tl.sum(probs, axis=0)
+        v_vals = tl.load(VQ + row_td + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0).to(tl.float32)
+        v_scales = tl.load(VS + row_t + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
+        acc = tl.sum((probs / denom)[:, None] * v_vals * v_scales[:, None], axis=0)
+        tl.store(O + row * D + offs_d, acc, mask=offs_d < D)
+
+    _kernel[(batch * heads,)](q_c, k_c, ks_c, v_c, vs_c, out, tokens, dim, sm_scale, BT=block_t, BD=block_d)
+    return out.view_as(q)
+
+
+def triton_fused_uint8_kv_attention(q, k_q, k_scale, k_zero_point, v_q, v_scale, v_zero_point, *, scale=None, is_causal: bool = False):
+    """Decode attention that dequantizes asymmetric uint8 K/V inside Triton."""
+
+    torch = require_torch()
+    if not _supports_fused_decode(q, k_q, v_q, k_scale, v_scale):
+        from .kv_cache import dequantize_uint8_per_token
+
+        k = dequantize_uint8_per_token(k_q, k_scale, k_zero_point, dtype=q.dtype)
+        v = dequantize_uint8_per_token(v_q, v_scale, v_zero_point, dtype=q.dtype)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
+
+    import triton
+    import triton.language as tl
+
+    q_c = q.contiguous()
+    k_c = k_q.contiguous()
+    v_c = v_q.contiguous()
+    ks_c = k_scale.contiguous()
+    vs_c = v_scale.contiguous()
+    kz_c = k_zero_point.contiguous()
+    vz_c = v_zero_point.contiguous()
+    batch, heads, _, dim = q_c.shape
+    tokens = k_c.shape[-2]
+    block_d = triton.next_power_of_2(dim)
+    block_t = triton.next_power_of_2(tokens)
+    if block_d > 256 or block_t > 4096:
+        from .kv_cache import dequantize_uint8_per_token
+
+        k = dequantize_uint8_per_token(k_q, k_scale, k_zero_point, dtype=q.dtype)
+        v = dequantize_uint8_per_token(v_q, v_scale, v_zero_point, dtype=q.dtype)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
+    out = torch.empty_like(q_c)
+    sm_scale = float(scale) if scale is not None else dim ** -0.5
+
+    @triton.jit
+    def _kernel(Q, KQ, KS, KZ, VQ, VS, VZ, O, T: tl.constexpr, D: tl.constexpr, SM: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr):
+        row = tl.program_id(0)
+        offs_t = tl.arange(0, BT)
+        offs_d = tl.arange(0, BD)
+        row_td = row * T * D
+        row_t = row * T
+        q_vals = tl.load(Q + row * D + offs_d, mask=offs_d < D, other=0.0).to(tl.float32)
+        k_raw = tl.load(KQ + row_td + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0).to(tl.float32)
+        k_scales = tl.load(KS + row_t + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
+        k_zp = tl.load(KZ + row_t + offs_t, mask=offs_t < T, other=0).to(tl.float32)
+        scores = tl.sum(q_vals[None, :] * (k_raw - k_zp[:, None]) * k_scales[:, None], axis=1) * SM
+        scores = tl.where(offs_t < T, scores, -3.4028234663852886e38)
+        scores = scores - tl.max(scores, axis=0)
+        probs = tl.exp(scores)
+        denom = tl.sum(probs, axis=0)
+        v_raw = tl.load(VQ + row_td + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0).to(tl.float32)
+        v_scales = tl.load(VS + row_t + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
+        v_zp = tl.load(VZ + row_t + offs_t, mask=offs_t < T, other=0).to(tl.float32)
+        acc = tl.sum((probs / denom)[:, None] * (v_raw - v_zp[:, None]) * v_scales[:, None], axis=0)
+        tl.store(O + row * D + offs_d, acc, mask=offs_d < D)
+
+    _kernel[(batch * heads,)](q_c, k_c, ks_c, kz_c, v_c, vs_c, vz_c, out, tokens, dim, sm_scale, BT=block_t, BD=block_d)
+    return out.view_as(q)
+
+
+def _supports_fused_decode(q, k_q, v_q, k_scale, v_scale) -> bool:
+    return bool(
+        _can_use_triton(q)
+        and getattr(k_q, "is_cuda", False)
+        and getattr(v_q, "is_cuda", False)
+        and q.dim() == 4
+        and k_q.dim() == 4
+        and v_q.dim() == 4
+        and q.shape[-2] == 1
+        and q.shape[0] == k_q.shape[0] == v_q.shape[0]
+        and q.shape[1] == k_q.shape[1] == v_q.shape[1]
+        and q.shape[-1] == k_q.shape[-1] == v_q.shape[-1]
+        and k_q.shape[-2] == v_q.shape[-2]
+        and tuple(k_scale.shape) == (*k_q.shape[:-1], 1)
+        and tuple(v_scale.shape) == (*v_q.shape[:-1], 1)
+    )
 def _prepare_rope_cache(cos, sin, target):
     if cos.shape[-1] * 2 == target.shape[-1]:
         cos = cos.repeat_interleave(2, dim=-1)
@@ -309,4 +445,3 @@ def _prepare_rope_cache(cos, sin, target):
 
 def _can_use_triton(tensor: Any) -> bool:
     return bool(triton_available() and hasattr(tensor, "is_cuda") and tensor.is_cuda)
-

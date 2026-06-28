@@ -46,6 +46,8 @@ class TokenQualityResult:
 
 def compare_logits(baseline, candidate, *, top_k: int = 5, max_mean_abs: float = 0.02, min_top1: float = 0.98) -> LogitQualityResult:
     torch = _import_torch()
+    if top_k < 1:
+        raise ValueError("top_k must be >= 1")
     if baseline.shape != candidate.shape:
         raise ValueError(f"logit shapes must match, got {tuple(baseline.shape)} and {tuple(candidate.shape)}")
     base = baseline.detach().float()

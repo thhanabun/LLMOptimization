@@ -25,7 +25,7 @@ def select_quantized_attention_backend(q, k, *, requested: str = "auto", quant_d
             from .triton_kernels import triton_available
 
             if triton_available():
-                return QuantizedAttentionDispatch(requested, "triton", "triton-quant-dequant+sdpa", quant_dtype, "using Triton quant/dequant kernels before SDPA")
+                return QuantizedAttentionDispatch(requested, "triton", "fused-decode-or-quant-dequant+sdpa", quant_dtype, "using fused Triton decode attention when supported")
         except Exception as exc:
             if requested == "triton":
                 raise
@@ -92,6 +92,8 @@ def _registry() -> dict[str, Callable[..., Any]]:
         "triton_dequantize_int8_per_token": triton_dequantize_int8_per_token,
         "triton_quantize_uint8_per_token": triton_quantize_uint8_per_token,
         "triton_dequantize_uint8_per_token": triton_dequantize_uint8_per_token,
+        "triton_fused_int8_kv_attention": triton_fused_int8_kv_attention,
+        "triton_fused_uint8_kv_attention": triton_fused_uint8_kv_attention,
         "scaled_dot_product_attention": scaled_dot_product_attention,
         "quantized_kv_attention": quantized_kv_attention,
         "chunked_cross_entropy": chunked_cross_entropy,
@@ -222,6 +224,18 @@ def triton_dequantize_uint8_per_token(q, scale, zero_point, *, dtype=None):
 
     return _triton_dequantize_uint8_per_token(q, scale, zero_point, dtype=dtype)
 
+def triton_fused_int8_kv_attention(q, k_q, k_scale, v_q, v_scale, *, scale=None, is_causal: bool = False):
+    from .triton_kernels import triton_fused_int8_kv_attention as _triton_fused_int8_kv_attention
+
+    return _triton_fused_int8_kv_attention(q, k_q, k_scale, v_q, v_scale, scale=scale, is_causal=is_causal)
+
+
+def triton_fused_uint8_kv_attention(q, k_q, k_scale, k_zero_point, v_q, v_scale, v_zero_point, *, scale=None, is_causal: bool = False):
+    from .triton_kernels import triton_fused_uint8_kv_attention as _triton_fused_uint8_kv_attention
+
+    return _triton_fused_uint8_kv_attention(q, k_q, k_scale, k_zero_point, v_q, v_scale, v_zero_point, scale=scale, is_causal=is_causal)
+
+
 def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None):
     """Dispatch to PyTorch SDPA, which can use FlashAttention-style kernels on supported GPUs."""
 
@@ -250,11 +264,15 @@ def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None
     if dispatch.selected_backend == "triton" and quant_dtype == "int8":
         qk, ks = triton_quantize_int8_per_token(k, eps=eps)
         qv, vs = triton_quantize_int8_per_token(v, eps=eps)
+        if attn_mask is None and dropout_p == 0.0 and not is_causal and getattr(q, "dim", lambda: 0)() == 4 and q.shape[-2] == 1:
+            return triton_fused_int8_kv_attention(q, qk, ks, qv, vs, scale=scale, is_causal=is_causal)
         k_dequant = triton_dequantize_int8_per_token(qk, ks, dtype=k.dtype)
         v_dequant = triton_dequantize_int8_per_token(qv, vs, dtype=v.dtype)
     elif dispatch.selected_backend == "triton" and quant_dtype == "uint8":
         qk, ks, kz = triton_quantize_uint8_per_token(k, eps=eps)
         qv, vs, vz = triton_quantize_uint8_per_token(v, eps=eps)
+        if attn_mask is None and dropout_p == 0.0 and not is_causal and getattr(q, "dim", lambda: 0)() == 4 and q.shape[-2] == 1:
+            return triton_fused_uint8_kv_attention(q, qk, ks, kz, qv, vs, vz, scale=scale, is_causal=is_causal)
         k_dequant = triton_dequantize_uint8_per_token(qk, ks, kz, dtype=k.dtype)
         v_dequant = triton_dequantize_uint8_per_token(qv, vs, vz, dtype=v.dtype)
     else:

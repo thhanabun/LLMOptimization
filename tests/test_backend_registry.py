@@ -15,9 +15,11 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertEqual(registry.best("slow", "fast").name, "fast")
         self.assertIn("fast", registry.to_text())
 
-    def test_default_registry_has_torch(self):
-        names = [item.name for item in default_backend_registry().list()]
-        self.assertIn("torch", names)
+    def test_default_registry_checks_torch_import(self):
+        registry = default_backend_registry()
+        torch_info = registry.get("torch")
+        self.assertTrue(torch_info.available)
+        self.assertIn("torch", torch_info.reason)
 
 
 if __name__ == "__main__":

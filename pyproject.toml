@@ -9,7 +9,7 @@ description = "Memory-first LLM analysis toolkit with PyTorch-compatible tracing
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "PF26" }]
-license = { text = "MIT" }
+license = "MIT"
 keywords = ["llm", "memory", "pytorch", "debugger", "optimizer"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -27,4 +27,3 @@ llm-memlab = "llm_memlab.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

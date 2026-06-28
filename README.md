@@ -367,7 +367,7 @@ from llm_memlab import KVCacheConfig, PagedKVCache
 cache = PagedKVCache(KVCacheConfig(num_layers=32, batch_size=1, num_heads=32, head_dim=128, max_seq_len=4096), page_size=32)
 ```
 
-`quantized_kv_attention` exposes the fused quantized-KV attention contract today through a portable dequant+SDPA implementation. A Triton kernel can later replace the internals without changing callers:
+`quantized_kv_attention` exposes the quantized-KV attention contract with a portable dequant+SDPA fallback. On CUDA with Triton, single-token non-causal decode (`q` shaped `[batch, heads, 1, head_dim]`) can use the fused decode path that dequantizes K/V inside the attention kernel:
 
 ```python
 from llm_memlab import quantized_kv_attention
@@ -424,7 +424,7 @@ print(report.to_text())
 
 ## Quantized Attention Backend Selector
 
-`quantized_kv_attention` now accepts `backend="auto" | "torch" | "triton"`, and `select_quantized_attention_backend()` reports the selected backend, implementation label, quant dtype, and fallback reason. The current implementation is a Triton-ready dispatch surface with a portable PyTorch dequant+SDPA fallback.
+`quantized_kv_attention` now accepts `backend="auto" | "torch" | "triton"`, and `select_quantized_attention_backend()` reports the selected backend, implementation label, quant dtype, and fallback reason. The current implementation uses fused Triton decode attention when the shape is supported, and falls back to Triton quant/dequant+PyTorch SDPA or portable PyTorch dequant+SDPA otherwise.
 
 ```python
 from llm_memlab import quantized_kv_attention
@@ -556,7 +556,14 @@ qu8, scale, zero_point = triton_quantize_uint8_per_token(k)
 k_uint8 = triton_dequantize_uint8_per_token(qu8, scale, zero_point, dtype=k.dtype)
 ```
 
-`quantized_kv_attention(..., backend="triton")` uses these Triton quant/dequant kernels when CUDA+Triton are available, then calls PyTorch SDPA. A fully fused quantized attention kernel is still the next major hot-path step.
+`quantized_kv_attention(..., backend="triton")` now uses fused Triton decode attention for single-token decode, so K/V are dequantized inside the softmax attention kernel instead of materializing full dequantized K/V tensors first. Causal mode, non-decode shapes, masks, dropout, and oversized head/token blocks safely fall back to Triton quant/dequant + PyTorch SDPA.
+Run CUDA/Triton validation on a GPU machine:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m unittest discover -s tests -p test_cuda_triton.py
+python -m llm_memlab kernel-demo --device cuda --repeats 3
+```
 
 ## Roadmap
 

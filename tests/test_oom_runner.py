@@ -4,6 +4,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
+import llm_memlab.oom_runner as oom_runner
 from llm_memlab.oom_runner import OOMStrategy, is_oom_error, run_with_oom_fallback
 
 
@@ -21,6 +22,19 @@ class OOMRunnerTests(unittest.TestCase):
         self.assertEqual(result.value, 2)
         self.assertEqual(result.strategy.name, "second")
         self.assertEqual(result.attempts, ("first: OOM", "second"))
+
+    def test_fallback_clears_cuda_cache_after_oom(self):
+        calls = []
+        original = oom_runner.clear_cuda_cache
+        oom_runner.clear_cuda_cache = lambda: calls.append("cleared") or True
+        try:
+            run_with_oom_fallback(
+                lambda **kwargs: (_ for _ in ()).throw(RuntimeError("CUDA out of memory")) if kwargs.get("fail") else "ok",
+                [OOMStrategy("first", {"fail": True}), OOMStrategy("second", {"fail": False})],
+            )
+        finally:
+            oom_runner.clear_cuda_cache = original
+        self.assertEqual(calls, ["cleared"])
 
     def test_non_oom_error_is_not_swallowed(self):
         with self.assertRaisesRegex(RuntimeError, "shape"):

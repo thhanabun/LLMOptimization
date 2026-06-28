@@ -34,7 +34,20 @@ def run_with_oom_fallback(fn: Callable[..., Any], strategies: list[OOMStrategy])
             if not is_oom_error(exc):
                 raise
             errors.append(f"{strategy.name}: OOM")
+            clear_cuda_cache()
     raise RuntimeError("All OOM fallback strategies failed: " + "; ".join(errors))
+
+
+def clear_cuda_cache() -> bool:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def is_oom_error(exc: BaseException) -> bool:

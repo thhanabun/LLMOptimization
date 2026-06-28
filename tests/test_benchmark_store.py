@@ -7,7 +7,8 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from llm_memlab.benchmark import BenchmarkResult
-from llm_memlab.benchmark_store import read_benchmark_json, record_from_benchmark, write_benchmark_csv, write_benchmark_json
+from llm_memlab.benchmark_store import read_benchmark_json, record_from_benchmark, records_from_suite, write_benchmark_csv, write_benchmark_json
+from llm_memlab.benchmark_suite import InferenceSuiteResult
 
 
 class BenchmarkStoreTests(unittest.TestCase):
@@ -26,6 +27,14 @@ class BenchmarkStoreTests(unittest.TestCase):
             self.assertEqual(loaded[0].kind, "prefill")
             self.assertIn("extra", csv_path.read_text(encoding="utf-8"))
             self.assertEqual(json.loads(json_path.read_text(encoding="utf-8"))[0]["mean_ms"], 2.0)
+
+    def test_records_from_suite_includes_decode(self):
+        decode = BenchmarkResult("decode", [2.0, 4.0])
+        result = InferenceSuiteResult("tiny", decode=decode)
+        records = records_from_suite(result)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].kind, "decode")
+        self.assertEqual(records[0].mean_ms, 3.0)
 
 
 if __name__ == "__main__":

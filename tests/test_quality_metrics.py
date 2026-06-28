@@ -27,6 +27,10 @@ class QualityMetricsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             compare_logits(torch.randn(1, 2), torch.randn(1, 3))
 
+    def test_compare_logits_rejects_invalid_top_k(self):
+        with self.assertRaises(ValueError):
+            compare_logits(torch.randn(1, 2, 3), torch.randn(1, 2, 3), top_k=0)
+
     def test_compare_token_sequences_reports_agreement(self):
         result = compare_token_sequences([1, 2, 3, 4], [1, 2, 5, 4])
         self.assertFalse(result.exact_match)
