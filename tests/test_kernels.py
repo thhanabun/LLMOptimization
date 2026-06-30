@@ -109,7 +109,6 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(q.dtype, torch.int8)
         self.assertLess((x - y).abs().mean().item(), 0.02)
 
-
     def test_triton_uint8_quantize_dequantize_falls_back_on_cpu(self):
         x = torch.randn(2, 3, 4, 8)
         q, scale, zero_point = triton_quantize_uint8_per_token(x)
@@ -123,6 +122,7 @@ class KernelTests(unittest.TestCase):
         v = torch.randn(1, 2, 4, 8)
         out = quantized_kv_attention(q, k, v, quant_dtype="uint8", backend="auto")
         self.assertEqual(out.shape, q.shape)
+
     def test_chunked_cross_entropy_matches_reference(self):
         logits = torch.randn(2, 5, 11)
         targets = torch.randint(0, 11, (2, 5))
@@ -172,14 +172,13 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(y1.shape, x1.shape)
         self.assertEqual(cache.length, 2)
 
-
-
     def test_quantized_attention_backend_selector(self):
         q = torch.randn(1, 2, 1, 8)
         k = torch.randn(1, 2, 4, 8)
         dispatch = select_quantized_attention_backend(q, k, requested="auto", quant_dtype="int8")
         self.assertEqual(dispatch.selected_backend, "torch")
         self.assertIn("fallback", dispatch.reason)
+
     def test_quantized_kv_attention_preserves_shape(self):
         q = torch.randn(1, 2, 1, 8)
         k = torch.randn(1, 2, 4, 8)
@@ -188,6 +187,7 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(out.shape, q.shape)
         with self.assertRaises(ValueError):
             quantized_kv_attention(q, k, v, backend="bad")
+
     def test_sdpa_preserves_shape(self):
         q = torch.randn(2, 4, 8, 16)
         k = torch.randn(2, 4, 8, 16)
@@ -200,4 +200,3 @@ class KernelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

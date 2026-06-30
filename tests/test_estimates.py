@@ -25,11 +25,7 @@ class EstimateTests(unittest.TestCase):
             training="full",
         )
         full = estimate_transformer_memory(base)
-        lora = estimate_transformer_memory(
-            TransformerConfig(
-                **{**base.__dict__, "training": "lora", "lora_rank": 8}
-            )
-        )
+        lora = estimate_transformer_memory(TransformerConfig(**{**base.__dict__, "training": "lora", "lora_rank": 8}))
         self.assertLess(lora.trainable_parameter_count, full.trainable_parameter_count)
         self.assertLess(lora.optimizer_bytes, full.optimizer_bytes)
 

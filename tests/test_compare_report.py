@@ -26,8 +26,6 @@ class CompareReportTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertIn("demo", path.read_text(encoding="utf-8"))
 
-
-
     def test_scoreboard_html(self):
         rows = [{"model": "tiny", "status": "ok", "baseline_ms": 2.0, "optimized_ms": 1.0, "speedup": 2.0, "patched": 3}]
         html = scoreboard_to_html(rows)
@@ -37,7 +35,6 @@ class CompareReportTests(unittest.TestCase):
             path = write_scoreboard_html(rows, pathlib.Path(tmp) / "scoreboard.html")
             self.assertTrue(path.exists())
 
+
 if __name__ == "__main__":
     unittest.main()
-
-

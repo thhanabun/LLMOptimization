@@ -79,7 +79,6 @@ class KVCacheTests(unittest.TestCase):
                 self.assertEqual(cached_value.dtype, torch.float32)
                 self.assertIn(dtype_name, cache.stats().to_text())
 
-
     def test_paged_cache_append_and_read(self):
         cfg = KVCacheConfig(num_layers=1, batch_size=1, num_heads=2, head_dim=4, max_seq_len=5, dtype=torch.float32)
         cache = PagedKVCache(cfg, page_size=2)
@@ -96,6 +95,7 @@ class KVCacheTests(unittest.TestCase):
         freed = cache.release_pages(1)
         self.assertEqual(freed, 1)
         self.assertEqual(cache.allocated_pages, 1)
+
     def test_sample_next_token_greedy(self):
         logits = torch.tensor([[0.1, 2.0, 0.3]])
         token = sample_next_token(logits)
@@ -125,5 +125,3 @@ class KVCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

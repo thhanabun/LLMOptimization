@@ -7,7 +7,13 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from llm_memlab.benchmark import BenchmarkResult
-from llm_memlab.benchmark_store import read_benchmark_json, record_from_benchmark, records_from_suite, write_benchmark_csv, write_benchmark_json
+from llm_memlab.benchmark_store import (
+    read_benchmark_json,
+    record_from_benchmark,
+    records_from_suite,
+    write_benchmark_csv,
+    write_benchmark_json,
+)
 from llm_memlab.benchmark_suite import InferenceSuiteResult
 
 
