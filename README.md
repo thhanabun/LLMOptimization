@@ -11,6 +11,55 @@ This is intentionally not a PyTorch replacement yet. It is the first useful laye
 keep PyTorch compatibility, make memory visible, then move hot paths into custom
 backends or Triton kernels later.
 
+## How To Use In 5 Minutes
+
+From this checkout:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m llm_memlab backend-demo
+python -m llm_memlab fused-decode-bench --q-heads 4 --kv-heads 2 --tokens 64 --head-dim 32 --repeats 3 --json-out fused.json --csv-out fused.csv --html-out fused.html
+python examples/memory_first_generate.py
+python examples/deep_debug_report.py
+python examples/regression_benchmark_ci.py
+```
+
+For CUDA/Triton validation on a GPU machine:
+
+```powershell
+python -m unittest discover -s tests -p test_cuda_triton.py
+python -m llm_memlab kernel-demo --device cuda --repeats 3
+```
+
+### Production Docs
+
+- [Stable vs Experimental](docs/stable_vs_experimental.md)
+- [Production Checklist](docs/production_checklist.md)
+- [How To Integrate In CI](docs/ci_integration.md)
+- [HF Adapter Limitations](docs/hf_adapter_limitations.md)
+- [Kernel Policy Decision Table](docs/kernel_policy_decision_table.md)
+- [Deprecation And Versioning Policy](docs/versioning.md)
+
+Use `llm_memlab.production` for stable APIs and `llm_memlab.experimental` only for opt-in certified kernel paths.
+### Production Notes
+
+For production-oriented use, keep the stable path conservative:
+
+- Use `benchmark-compare` and `BenchmarkGateConfig` in CI to fail on latency or quality regressions.
+- Store benchmark artifacts with schema version, hardware metadata, warmup/repeats, seed, backend, dtype, and sequence length.
+- Use `QualityThresholds` and `assert_quality_regression()` as a required merge gate for optimized model paths.
+- Use `select_kernel_policy()` with the default policy for stable fallback. Paged fused Triton kernels are labeled `triton-experimental` and require `KernelPolicy(allow_experimental=True)` or `backend="triton-experimental"`.
+- Use `profile_decode_memory()`/`write_memory_profile_json()` for observability artifacts; the profiler does not alter model numerics.
+- Use `select_memory_adapter()` for family-specific HF adapter selection (`LlamaMemoryAdapter`, `QwenMemoryAdapter`, `MistralMemoryAdapter`) and keep model-family integration tests local to the adapter being promoted.
+### Runtime v3 Features
+
+- Paged fused decode v3 supports int8 and uint8 paged K/V, GQA/MQA, batch-specific page tables shaped `[batch, logical_page]`, variable sequence lengths shaped `[batch]`, and a streaming softmax fallback for long contexts. It is intentionally exposed as `triton-experimental` until multi-GPU coverage is broad enough.
+- `MemoryFirstTransformersCache` implements a small Transformers Cache-compatible facade with `update()`, `get_seq_length()`, `to_legacy_cache()`, and `reorder_cache()` for Llama/Qwen/Mistral-style decoders.
+- `install_memory_first_generate()` can conservatively inject a memory-first cache into `model.generate()`, falling back to the original call when a model rejects external cache objects.
+- `fused-decode-bench` runs a CUDA benchmark matrix and can write JSON/CSV/HTML plus fail on speed or quality regression.
+- `profile_decode_memory()` records CUDA allocated/reserved/peak memory around decode steps and exports HTML.
+- `run_quality_regression()` checks logits, top-k overlap, generated-token agreement, and next-token-loss delta.
+- `select_kernel_policy()` explains why it selected torch, Triton, dense fused decode, or paged fused decode.
 ## Quick Start
 
 Use it directly from this checkout:
@@ -565,6 +614,82 @@ python -m unittest discover -s tests -p test_cuda_triton.py
 python -m llm_memlab kernel-demo --device cuda --repeats 3
 ```
 
+## Memory-First Runtime v2
+
+Fused Triton decode v2 supports single-token non-causal decode for MHA, GQA, and MQA layouts where `q_heads` is divisible by `kv_heads`. The int8 paged path reads K/V through a page table, so decode can avoid materializing a full dequantized K/V tensor before attention:
+
+```python
+from llm_memlab import benchmark_fused_decode_attention, quantized_kv_attention
+
+out = quantized_kv_attention(q, k, v, quant_dtype="int8", backend="triton")
+bench = benchmark_fused_decode_attention(q_heads=8, kv_heads=2, tokens=128, head_dim=64, repeats=20)
+print(bench.to_text())
+```
+
+Paged fused decode now covers int8 and uint8 K/V with `head_dim <= 256`; long contexts use the streaming paged path to avoid materializing full dequantized K/V. Unsupported masks, dropout, causal multi-token paths, or CPU tensors fall back to portable reference paths.
+
+## Memory-First Hugging Face Adapter
+
+`MemoryFirstHFAdapter` provides a real custom generate loop for HF-style causal LMs that accept and return legacy tuple `past_key_values`. It stores returned K/V in `QuantizedStaticKVCache` or `PagedKVCache` between decode steps:
+
+```python
+from llm_memlab import MemoryFirstHFConfig, memory_first_generate
+
+result = memory_first_generate(
+    model,
+    input_ids,
+    MemoryFirstHFConfig(cache="quantized", quant_dtype="int8", max_new_tokens=32),
+)
+print(result.to_text())
+```
+
+This is intentionally conservative: newer model-specific HF `Cache` objects may still need dedicated adapters.
+
+## Deep Debugger
+
+The deep debugger compares baseline vs optimized models layer-by-layer, reports output quality drift, flags NaN/Inf, detects collapsed/dead attention heads when q/k projections are visible, and writes one interactive HTML page with timeline, memory, quality, and clickable layer details:
+
+```python
+from llm_memlab import build_deep_debug_report, write_deep_debug_html
+
+report = build_deep_debug_report(baseline_model, optimized_model, **encoded)
+write_deep_debug_html(report, "deep_debug.html")
+```
+
+## Benchmark Database v2
+
+Benchmark records can now carry run metadata such as GPU name, torch version, Triton version, dtype, sequence length, and git commit. JSON/CSV records can be compared across runs, and regressions can fail a test when slowdown exceeds a threshold:
+
+```python
+from llm_memlab import (
+    assert_no_regressions,
+    collect_run_metadata,
+    compare_record_sets,
+    read_benchmark_json,
+    records_from_suite,
+    write_benchmark_json,
+)
+
+metadata = collect_run_metadata(dtype="fp16", sequence_length=4096)
+write_benchmark_json(records_from_suite(suite, metadata=metadata), "candidate.json")
+comparisons = compare_record_sets(read_benchmark_json("baseline.json"), read_benchmark_json("candidate.json"), max_slowdown_pct=10.0)
+assert_no_regressions(comparisons)
+```
+
+## Library API Polish
+
+The package now exposes `llm_memlab.backends` for backend availability/selection and `KernelPolicy` for choosing kernel backend, quant dtype, fused decode preference, and paged-attention limits:
+
+```python
+from llm_memlab.backends import default_backend_registry
+from llm_memlab import KernelPolicy
+
+registry = default_backend_registry()
+policy = KernelPolicy(backend="triton", quant_dtype="int8", prefer_fused_decode=True)
+policy.validate()
+```
+
+CI runs Python 3.10-3.12 and includes a CUDA-optional test profile that skips GPU tests when CUDA/Triton are unavailable.
 ## Roadmap
 
 1. Add model importers for Hugging Face transformer blocks.

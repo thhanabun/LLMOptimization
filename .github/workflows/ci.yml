@@ -8,8 +8,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
+        test-profile: ["cpu", "cuda", "hf", "slow"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,7 +19,65 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install package
         run: python -m pip install -e .[dev]
-      - name: Run tests
-        run: python -m unittest discover -s tests
+      - name: Ruff lint
+        run: python -m ruff check src/llm_memlab/production.py src/llm_memlab/experimental.py src/llm_memlab/kernel_certification.py tests/test_hf_integration_matrix.py tests/test_kernel_certification.py
+      - name: Ruff format check
+        run: python -m ruff format --check src/llm_memlab/production.py src/llm_memlab/experimental.py src/llm_memlab/kernel_certification.py tests/test_hf_integration_matrix.py tests/test_kernel_certification.py
+      - name: Type check stable surface
+        run: python -m mypy src/llm_memlab/production.py src/llm_memlab/experimental.py src/llm_memlab/kernel_certification.py
       - name: Compile sources
-        run: python -m py_compile $(find src -name "*.py")
+        run: python -m py_compile $(find src tests examples -name "*.py")
+      - name: Run CPU tests
+        if: matrix.test-profile == 'cpu'
+        run: python -m unittest discover -s tests
+      - name: Run CUDA/Triton optional tests
+        if: matrix.test-profile == 'cuda'
+        run: python -m unittest discover -s tests -p test_cuda_triton.py
+      - name: Run HF integration matrix tests
+        if: matrix.test-profile == 'hf'
+        run: python -m unittest discover -s tests -p test_hf_integration_matrix.py
+      - name: Run slow certification tests
+        if: matrix.test-profile == 'slow'
+        run: python -m unittest discover -s tests -p test_kernel_certification.py
+      - name: Benchmark gate example
+        run: |
+          python - <<'PY'
+          from llm_memlab.production import BenchmarkGateConfig, BenchmarkRecord, assert_no_regressions, benchmark_gate
+          baseline = [BenchmarkRecord("decode/example", "decode", 10.0, 9.5, 11.0, extra={"quality_passed": True, "mean_abs": 0.0})]
+          candidate = [BenchmarkRecord("decode/example", "decode", 9.0, 8.8, 9.5, extra={"quality_passed": True, "mean_abs": 0.0})]
+          result = benchmark_gate(baseline, candidate, BenchmarkGateConfig(max_slowdown_pct=10.0, max_quality_mean_abs=0.01))
+          assert result.passed, result.to_text()
+          assert_no_regressions(result)
+          print(result.to_text())
+          PY
+
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheel
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Install wheel in clean venv
+        run: |
+          python -m venv .venv-wheel
+          . .venv-wheel/bin/activate
+          python -m pip install dist/*.whl
+          python - <<'PY'
+          import llm_memlab
+          from llm_memlab.production import KernelPolicy, MemoryFirstHFConfig, select_kernel_policy
+          from llm_memlab.experimental import EXPERIMENTAL_WARNING, experimental_kernel_policy
+          assert KernelPolicy().backend == "auto"
+          assert MemoryFirstHFConfig().cache == "quantized"
+          assert select_kernel_policy(q_heads=1, kv_heads=1, head_dim=32, sequence_length=16).backend in {"torch", "triton"}
+          assert "experimental" in EXPERIMENTAL_WARNING.lower()
+          assert experimental_kernel_policy().allow_experimental is True
+          print("wheel smoke ok")
+          PY
