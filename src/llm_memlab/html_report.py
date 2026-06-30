@@ -29,11 +29,13 @@ def trace_to_html(trace: Any, *, title: str = "llm-memlab trace") -> str:
               <td><code>{_e(record.input_shapes)}</code></td>
               <td><code>{_e(record.output_shapes)}</code></td>
               <td>{_e(stat_text)}</td>
-              <td>{'NaN' if record.has_nan else ''} {'Inf' if record.has_inf else ''}</td>
+              <td>{"NaN" if record.has_nan else ""} {"Inf" if record.has_inf else ""}</td>
             </tr>
             """
         )
-    hot = "".join(f"<li><code>{_e(r.name)}</code> {r.elapsed_ms:.3f} ms, output {format_bytes(r.output_bytes)}</li>" for r in trace.slowest(8))
+    hot = "".join(
+        f"<li><code>{_e(r.name)}</code> {r.elapsed_ms:.3f} ms, output {format_bytes(r.output_bytes)}</li>" for r in trace.slowest(8)
+    )
     return f"""<!doctype html>
 <html lang='en'>
 <head>
@@ -68,7 +70,7 @@ code {{ white-space: pre-wrap; }}
 <h2>Layer table</h2>
 <table>
 <thead><tr><th>Module</th><th>Type</th><th>ms</th><th>Input</th><th>Output</th><th>Params</th><th>Input shape</th><th>Output shape</th><th>Stats</th><th>Flags</th></tr></thead>
-<tbody>{''.join(rows)}</tbody>
+<tbody>{"".join(rows)}</tbody>
 </table>
 </body>
 </html>"""
@@ -83,15 +85,11 @@ def write_trace_html(trace: Any, path: str | Path, *, title: str = "llm-memlab t
 def _stats_text(stats: Any) -> str:
     if stats is None or getattr(stats, "mean", None) is None:
         return "n/a"
-    return (
-        f"mean={stats.mean:.4g} std={stats.std:.4g} min={stats.min:.4g} "
-        f"max={stats.max:.4g} zero={stats.zero_pct:.2%}"
-    )
+    return f"mean={stats.mean:.4g} std={stats.std:.4g} min={stats.min:.4g} max={stats.max:.4g} zero={stats.zero_pct:.2%}"
 
 
 def _e(value: Any) -> str:
     return html.escape(str(value))
-
 
 
 def trace_timeline_to_html(trace: Any, *, title: str = "llm-memlab timeline") -> str:
@@ -137,11 +135,11 @@ code {{ white-space:pre-wrap; }}
 <h1>{_e(title)}</h1>
 <p>Sequential layer runtime timeline with output-memory bars.</p>
 <div class='summary'>
-  <div class='metric'>Total time<b>{getattr(trace, 'total_ms', 0.0):.3f} ms</b></div>
+  <div class='metric'>Total time<b>{getattr(trace, "total_ms", 0.0):.3f} ms</b></div>
   <div class='metric'>Layers<b>{len(records)}</b></div>
   <div class='metric'>Output bytes<b>{format_bytes(sum(r.output_bytes for r in records))}</b></div>
 </div>
-{''.join(rows)}
+{"".join(rows)}
 </body>
 </html>"""
 
@@ -187,7 +185,7 @@ code {{ white-space:pre-wrap; }}
 </head>
 <body>
 <h1>{_e(title)}</h1>
-<div class='metric'>Total: <b>{getattr(trace, 'total_ms', 0.0):.3f} ms</b></div>
+<div class='metric'>Total: <b>{getattr(trace, "total_ms", 0.0):.3f} ms</b></div>
 <div class='metric'>Layers: <b>{len(records)}</b></div>
 <div class='metric'>Output: <b>{format_bytes(sum(r.output_bytes for r in records))}</b></div>
 <div class='toolbar'>
@@ -198,7 +196,7 @@ code {{ white-space:pre-wrap; }}
 </div>
 <table id='layers'>
 <thead><tr><th onclick='sortTable(0,false)'>Module</th><th onclick='sortTable(1,false)'>Type</th><th onclick='sortTable(2,true)'>ms</th><th onclick='sortTable(3,true)'>Output</th><th onclick='sortTable(4,true)'>Params</th><th>Input</th><th>Output shape</th><th>Stats</th><th>Flags</th></tr></thead>
-<tbody>{''.join(rows)}</tbody>
+<tbody>{"".join(rows)}</tbody>
 </table>
 <script>
 function filterRows() {{

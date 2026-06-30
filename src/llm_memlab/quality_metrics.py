@@ -17,15 +17,18 @@ class LogitQualityResult:
     passed: bool
 
     def to_text(self) -> str:
-        return make_table(("Metric", "Value"), [
-            ("Mean abs error", f"{self.mean_abs_error:.6f}"),
-            ("Max abs error", f"{self.max_abs_error:.6f}"),
-            ("Cosine similarity", f"{self.cosine_similarity:.6f}"),
-            ("KL divergence", f"{self.kl_divergence:.6f}"),
-            ("Top-1 agreement", f"{self.top1_agreement:.1%}"),
-            ("Top-k agreement", f"{self.topk_agreement:.1%}"),
-            ("Passed", self.passed),
-        ])
+        return make_table(
+            ("Metric", "Value"),
+            [
+                ("Mean abs error", f"{self.mean_abs_error:.6f}"),
+                ("Max abs error", f"{self.max_abs_error:.6f}"),
+                ("Cosine similarity", f"{self.cosine_similarity:.6f}"),
+                ("KL divergence", f"{self.kl_divergence:.6f}"),
+                ("Top-1 agreement", f"{self.top1_agreement:.1%}"),
+                ("Top-k agreement", f"{self.topk_agreement:.1%}"),
+                ("Passed", self.passed),
+            ],
+        )
 
 
 @dataclass(frozen=True)
@@ -36,12 +39,15 @@ class TokenQualityResult:
     candidate_length: int
 
     def to_text(self) -> str:
-        return make_table(("Metric", "Value"), [
-            ("Exact match", self.exact_match),
-            ("Token agreement", f"{self.token_agreement:.1%}"),
-            ("Baseline length", self.baseline_length),
-            ("Candidate length", self.candidate_length),
-        ])
+        return make_table(
+            ("Metric", "Value"),
+            [
+                ("Exact match", self.exact_match),
+                ("Token agreement", f"{self.token_agreement:.1%}"),
+                ("Baseline length", self.baseline_length),
+                ("Candidate length", self.candidate_length),
+            ],
+        )
 
 
 def compare_logits(baseline, candidate, *, top_k: int = 5, max_mean_abs: float = 0.02, min_top1: float = 0.98) -> LogitQualityResult:

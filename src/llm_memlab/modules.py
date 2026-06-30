@@ -8,7 +8,19 @@ def _torch_nn():
     return torch, torch.nn
 
 
-class OptimizedRMSNorm(_torch_nn()[1].Module):
+def _lazy_torch_module():
+    try:
+        import torch
+    except ImportError:  # pragma: no cover
+
+        class _Fallback:
+            pass
+
+        return _Fallback
+    return torch.nn.Module
+
+
+class OptimizedRMSNorm(_lazy_torch_module()):
     """RMSNorm module backed by the compact manual-backward kernel."""
 
     def __init__(self, hidden_size: int, eps: float = 1e-6, bias: bool = False):
@@ -22,7 +34,7 @@ class OptimizedRMSNorm(_torch_nn()[1].Module):
         return rms_norm_manual_backward(x, self.weight, self.eps, self.bias)
 
 
-class OptimizedSwiGLUMLP(_torch_nn()[1].Module):
+class OptimizedSwiGLUMLP(_lazy_torch_module()):
     """SwiGLU MLP block with separate gate/up/down projections."""
 
     def __init__(self, hidden_size: int, intermediate_size: int, bias: bool = False, use_triton: bool = False):
@@ -46,7 +58,7 @@ class OptimizedSwiGLUMLP(_torch_nn()[1].Module):
         )
 
 
-class OptimizedSelfAttention(_torch_nn()[1].Module):
+class OptimizedSelfAttention(_lazy_torch_module()):
     """Self-attention block using qkv packing, optional RoPE, SDPA, and optional StaticKVCache."""
 
     def __init__(self, hidden_size: int, num_heads: int, bias: bool = False, dropout_p: float = 0.0, layer_idx: int | None = None):
@@ -61,7 +73,17 @@ class OptimizedSelfAttention(_torch_nn()[1].Module):
         self.qkv_proj = nn.Linear(hidden_size, hidden_size * 3, bias=bias)
         self.out_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
 
-    def forward(self, x, cos=None, sin=None, *, is_causal: bool = True, kv_cache=None, layer_idx: int | None = None, cache_position: int | None = None):
+    def forward(
+        self,
+        x,
+        cos=None,
+        sin=None,
+        *,
+        is_causal: bool = True,
+        kv_cache=None,
+        layer_idx: int | None = None,
+        cache_position: int | None = None,
+    ):
         effective_layer_idx = self.layer_idx if layer_idx is None else layer_idx
         if kv_cache is not None:
             if effective_layer_idx is None:
@@ -94,7 +116,7 @@ class OptimizedSelfAttention(_torch_nn()[1].Module):
         )
 
 
-class OptimizedDecoderBlock(_torch_nn()[1].Module):
+class OptimizedDecoderBlock(_lazy_torch_module()):
     """Llama-style pre-norm decoder block built from optimized primitives."""
 
     def __init__(
@@ -116,7 +138,17 @@ class OptimizedDecoderBlock(_torch_nn()[1].Module):
         self.post_attention_norm = OptimizedRMSNorm(hidden_size, eps=norm_eps)
         self.mlp = OptimizedSwiGLUMLP(hidden_size, intermediate_size, bias=bias, use_triton=use_triton)
 
-    def forward(self, x, cos=None, sin=None, *, is_causal: bool = True, kv_cache=None, cache_position: int | None = None, layer_idx: int | None = None):
+    def forward(
+        self,
+        x,
+        cos=None,
+        sin=None,
+        *,
+        is_causal: bool = True,
+        kv_cache=None,
+        cache_position: int | None = None,
+        layer_idx: int | None = None,
+    ):
         effective_layer_idx = self.layer_idx if layer_idx is None else layer_idx
         x = x + self.self_attn(
             self.input_norm(x),

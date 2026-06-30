@@ -19,10 +19,13 @@ class OOMRunResult:
     attempts: tuple[str, ...]
 
     def to_text(self) -> str:
-        return make_table(("Metric", "Value"), [
-            ("Selected strategy", self.strategy.name),
-            ("Attempts", ", ".join(self.attempts)),
-        ])
+        return make_table(
+            ("Metric", "Value"),
+            [
+                ("Selected strategy", self.strategy.name),
+                ("Attempts", ", ".join(self.attempts)),
+            ],
+        )
 
 
 def run_with_oom_fallback(fn: Callable[..., Any], strategies: list[OOMStrategy]) -> OOMRunResult:
@@ -59,8 +62,10 @@ def default_generation_strategies(policy=None) -> list[OOMStrategy]:
     strategies = [OOMStrategy("policy-default", {})]
     if policy is not None and getattr(policy, "use_quantized_cache", False):
         strategies.append(OOMStrategy("disable-cache", {"use_cache": False}))
-    strategies.extend([
-        OOMStrategy("no-cache", {"use_cache": False}),
-        OOMStrategy("cpu-friendly", {"use_cache": False}),
-    ])
+    strategies.extend(
+        [
+            OOMStrategy("no-cache", {"use_cache": False}),
+            OOMStrategy("cpu-friendly", {"use_cache": False}),
+        ]
+    )
     return strategies

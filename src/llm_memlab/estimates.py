@@ -204,7 +204,9 @@ def _optimizer_bytes(trainable_params: int, optimizer: str) -> int:
     raise ValueError("optimizer must be one of: none, adamw, adam, sgd, momentum, 8bit-adam, paged-adamw-8bit")
 
 
-def _notes(cfg: TransformerConfig, parameter_bytes: int, activation_bytes: int, kv_cache_bytes: int, optimizer_bytes: int) -> tuple[str, ...]:
+def _notes(
+    cfg: TransformerConfig, parameter_bytes: int, activation_bytes: int, kv_cache_bytes: int, optimizer_bytes: int
+) -> tuple[str, ...]:
     notes: list[str] = []
     if cfg.training == "lora" and cfg.lora_rank <= 0:
         notes.append("LoRA mode has rank 0, so only base model memory is counted.")

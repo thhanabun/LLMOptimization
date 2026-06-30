@@ -36,7 +36,9 @@ def plan_hf_cache(policy: MemoryPolicy, model: Any | None = None) -> HFCachePlan
         cache_impl = "dynamic"
         notes.append("HF native paged cache is model/version dependent; using dynamic cache hint when accepted.")
     if policy.use_quantized_cache:
-        notes.append("llm_memlab quantized KV cache is tracked as a policy recommendation; HF generate may ignore it without a model-specific cache adapter.")
+        notes.append(
+            "llm_memlab quantized KV cache is tracked as a policy recommendation; HF generate may ignore it without a model-specific cache adapter."
+        )
     if model is not None and not hasattr(model, "generate"):
         use_cache = False
         notes.append("Model has no generate(); disabling cache hints.")

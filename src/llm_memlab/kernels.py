@@ -5,7 +5,6 @@ from functools import lru_cache
 from typing import Any, Callable
 
 
-
 @dataclass(frozen=True)
 class QuantizedAttentionDispatch:
     requested_backend: str
@@ -25,7 +24,13 @@ def select_quantized_attention_backend(q, k, *, requested: str = "auto", quant_d
             from .triton_kernels import triton_available
 
             if triton_available():
-                return QuantizedAttentionDispatch(requested, "triton", "fused-decode-or-quant-dequant+sdpa", quant_dtype, "using fused Triton decode attention when supported")
+                return QuantizedAttentionDispatch(
+                    requested,
+                    "triton",
+                    "fused-decode-or-quant-dequant+sdpa",
+                    quant_dtype,
+                    "using fused Triton decode attention when supported",
+                )
         except Exception as exc:
             if requested == "triton":
                 raise
@@ -33,6 +38,7 @@ def select_quantized_attention_backend(q, k, *, requested: str = "auto", quant_d
     if requested == "triton":
         return QuantizedAttentionDispatch(requested, "torch", "dequant+sdpa", quant_dtype, "CUDA/Triton not available; using fallback")
     return QuantizedAttentionDispatch(requested, "torch", "dequant+sdpa", quant_dtype, "portable fallback")
+
 
 @dataclass(frozen=True)
 class KernelConfig:
@@ -94,6 +100,7 @@ def _registry() -> dict[str, Callable[..., Any]]:
         "triton_dequantize_uint8_per_token": triton_dequantize_uint8_per_token,
         "triton_fused_int8_kv_attention": triton_fused_int8_kv_attention,
         "triton_fused_uint8_kv_attention": triton_fused_uint8_kv_attention,
+        "triton_fused_int8_paged_kv_attention": triton_fused_int8_paged_kv_attention,
         "scaled_dot_product_attention": scaled_dot_product_attention,
         "quantized_kv_attention": quantized_kv_attention,
         "chunked_cross_entropy": chunked_cross_entropy,
@@ -212,7 +219,6 @@ def triton_dequantize_int8_per_token(q, scale, *, dtype=None):
     return _triton_dequantize_int8_per_token(q, scale, dtype=dtype)
 
 
-
 def triton_quantize_uint8_per_token(x, *, eps: float = 1e-6):
     from .triton_kernels import triton_quantize_uint8_per_token as _triton_quantize_uint8_per_token
 
@@ -224,6 +230,7 @@ def triton_dequantize_uint8_per_token(q, scale, zero_point, *, dtype=None):
 
     return _triton_dequantize_uint8_per_token(q, scale, zero_point, dtype=dtype)
 
+
 def triton_fused_int8_kv_attention(q, k_q, k_scale, v_q, v_scale, *, scale=None, is_causal: bool = False):
     from .triton_kernels import triton_fused_int8_kv_attention as _triton_fused_int8_kv_attention
 
@@ -234,6 +241,72 @@ def triton_fused_uint8_kv_attention(q, k_q, k_scale, k_zero_point, v_q, v_scale,
     from .triton_kernels import triton_fused_uint8_kv_attention as _triton_fused_uint8_kv_attention
 
     return _triton_fused_uint8_kv_attention(q, k_q, k_scale, k_zero_point, v_q, v_scale, v_zero_point, scale=scale, is_causal=is_causal)
+
+
+def triton_fused_int8_paged_kv_attention(
+    q,
+    k_pages,
+    k_scales,
+    v_pages,
+    v_scales,
+    page_table,
+    *,
+    length: int | None = None,
+    lengths=None,
+    page_size: int,
+    scale=None,
+    block_tokens: int = 4096,
+):
+    from .triton_kernels import triton_fused_int8_paged_kv_attention as _triton_fused_int8_paged_kv_attention
+
+    return _triton_fused_int8_paged_kv_attention(
+        q,
+        k_pages,
+        k_scales,
+        v_pages,
+        v_scales,
+        page_table,
+        length=length,
+        lengths=lengths,
+        page_size=page_size,
+        scale=scale,
+        block_tokens=block_tokens,
+    )
+
+
+def triton_fused_uint8_paged_kv_attention(
+    q,
+    k_pages,
+    k_scales,
+    k_zero_points,
+    v_pages,
+    v_scales,
+    v_zero_points,
+    page_table,
+    *,
+    length: int | None = None,
+    lengths=None,
+    page_size: int,
+    scale=None,
+    block_tokens: int = 4096,
+):
+    from .triton_kernels import triton_fused_uint8_paged_kv_attention as _triton_fused_uint8_paged_kv_attention
+
+    return _triton_fused_uint8_paged_kv_attention(
+        q,
+        k_pages,
+        k_scales,
+        k_zero_points,
+        v_pages,
+        v_scales,
+        v_zero_points,
+        page_table,
+        length=length,
+        lengths=lengths,
+        page_size=page_size,
+        scale=scale,
+        block_tokens=block_tokens,
+    )
 
 
 def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None):
@@ -251,7 +324,19 @@ def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p: float = 0.0
     )
 
 
-def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False, scale=None, eps: float = 1e-6, backend: str = "auto"):
+def quantized_kv_attention(
+    q,
+    k,
+    v,
+    *,
+    quant_dtype: str = "int8",
+    attn_mask=None,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+    scale=None,
+    eps: float = 1e-6,
+    backend: str = "auto",
+):
     """Attention wrapper that stores K/V through a quantized roundtrip before SDPA.
 
     This exposes the fused quantized-KV attention contract today. `backend="auto"`
@@ -280,6 +365,7 @@ def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None
 
         k_dequant = _roundtrip(k, quant_dtype=quant_dtype, eps=eps)
         v_dequant = _roundtrip(v, quant_dtype=quant_dtype, eps=eps)
+    k_dequant, v_dequant = _repeat_kv_for_gqa(q, k_dequant, v_dequant)
     return scaled_dot_product_attention(
         q,
         k_dequant,
@@ -289,6 +375,15 @@ def quantized_kv_attention(q, k, v, *, quant_dtype: str = "int8", attn_mask=None
         is_causal=is_causal,
         scale=scale,
     )
+
+
+def _repeat_kv_for_gqa(q, k, v):
+    if getattr(q, "dim", lambda: 0)() == 4 and getattr(k, "dim", lambda: 0)() == 4 and q.shape[1] != k.shape[1]:
+        if q.shape[1] % k.shape[1] != 0:
+            raise ValueError("q heads must be divisible by kv heads for GQA/MQA")
+        repeat = q.shape[1] // k.shape[1]
+        return k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)
+    return k, v
 
 
 def qkv_rope_attention(
@@ -377,7 +472,9 @@ def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index:
         pieces = []
         for start in range(0, flat_logits.shape[0], chunk_size):
             end = min(start + chunk_size, flat_logits.shape[0])
-            pieces.append(functional.cross_entropy(flat_logits[start:end], flat_targets[start:end], ignore_index=ignore_index, reduction="none"))
+            pieces.append(
+                functional.cross_entropy(flat_logits[start:end], flat_targets[start:end], ignore_index=ignore_index, reduction="none")
+            )
         return torch.cat(pieces, dim=0).reshape_as(targets)
 
     total = flat_logits.new_zeros(())
@@ -393,7 +490,9 @@ def chunked_cross_entropy(logits, targets, chunk_size: int = 1024, ignore_index:
     return total / valid.clamp_min(1)
 
 
-def linear_cross_entropy(hidden, lm_head_weight, targets, bias=None, chunk_size: int = 1024, ignore_index: int = -100, reduction: str = "mean"):
+def linear_cross_entropy(
+    hidden, lm_head_weight, targets, bias=None, chunk_size: int = 1024, ignore_index: int = -100, reduction: str = "mean"
+):
     """Compute LM-head projection and CE in token chunks without materializing full logits."""
 
     if chunk_size <= 0:
@@ -434,4 +533,3 @@ def _expand_rope_cache(cache, target):
     while cache.dim() < target.dim():
         cache = cache.unsqueeze(0)
     return cache.to(device=target.device, dtype=target.dtype)
-

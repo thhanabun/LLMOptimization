@@ -61,10 +61,7 @@ def compare_layer_drift(baseline: Any, candidate: Any, *args, record_leaf_only: 
         while handles:
             handles.pop().remove()
     names = sorted(set(baseline_outputs) | set(candidate_outputs))
-    records = [
-        _compare_tensors(torch, name, baseline_outputs.get(name), candidate_outputs.get(name))
-        for name in names
-    ]
+    records = [_compare_tensors(torch, name, baseline_outputs.get(name), candidate_outputs.get(name)) for name in names]
     return DriftReport(tuple(records))
 
 

@@ -4,15 +4,19 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .modules import OptimizedRMSNorm, OptimizedSwiGLUMLP
+
+
 def _lazy_torch_nn_module():
     try:
         import torch
     except ImportError:  # pragma: no cover
+
         class _Fallback:
             pass
 
         return _Fallback
     return torch.nn.Module
+
 
 @dataclass
 class PatchReport:
@@ -67,7 +71,9 @@ class PackedQKVAttentionAdapter(_lazy_torch_nn_module()):
         self.hidden_size = q_proj.in_features
         self.num_heads = int(getattr(source, "num_heads", getattr(source, "num_attention_heads", 1)))
         self.head_dim = int(getattr(source, "head_dim", q_proj.out_features // self.num_heads))
-        self.qkv_proj = torch.nn.Linear(self.hidden_size, q_proj.out_features + k_proj.out_features + v_proj.out_features, bias=q_proj.bias is not None)
+        self.qkv_proj = torch.nn.Linear(
+            self.hidden_size, q_proj.out_features + k_proj.out_features + v_proj.out_features, bias=q_proj.bias is not None
+        )
         self.o_proj = torch.nn.Linear(o_proj.in_features, o_proj.out_features, bias=o_proj.bias is not None)
         self.q_out = q_proj.out_features
         self.k_out = k_proj.out_features
@@ -109,6 +115,7 @@ class PackedQKVAttentionAdapter(_lazy_torch_nn_module()):
         if position_embeddings is not None:
             try:
                 from .kernels import apply_rope
+
                 cos, sin = position_embeddings
                 q, k = apply_rope(q, k, cos, sin)
             except Exception:
@@ -301,10 +308,9 @@ def _lazy_torch_nn_module():
     try:
         import torch
     except ImportError:  # pragma: no cover
+
         class _Fallback:
             pass
 
         return _Fallback
     return torch.nn.Module
-
-

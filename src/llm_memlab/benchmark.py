@@ -77,7 +77,9 @@ def benchmark_callable(name: str, fn: Callable[[], Any], config: BenchmarkConfig
     return BenchmarkResult(name=name, elapsed_ms=elapsed, peak_cuda_bytes=peak, output_shape=_shape(output))
 
 
-def benchmark_forward(model, input_factory: Callable[[], tuple[tuple[Any, ...], dict[str, Any]]], config: BenchmarkConfig | None = None) -> BenchmarkResult:
+def benchmark_forward(
+    model, input_factory: Callable[[], tuple[tuple[Any, ...], dict[str, Any]]], config: BenchmarkConfig | None = None
+) -> BenchmarkResult:
     def call():
         args, kwargs = input_factory()
         return model(*args, **kwargs)
@@ -95,7 +97,14 @@ def benchmark_decode(model, input_ids, decode_config: DecodeConfig, config: Benc
 
 def compare_benchmarks(results: list[BenchmarkResult]) -> str:
     rows = [
-        (result.name, f"{result.mean_ms:.3f}", f"{result.min_ms:.3f}", f"{result.max_ms:.3f}", _fmt_optional_bytes(result.peak_cuda_bytes), result.output_shape)
+        (
+            result.name,
+            f"{result.mean_ms:.3f}",
+            f"{result.min_ms:.3f}",
+            f"{result.max_ms:.3f}",
+            _fmt_optional_bytes(result.peak_cuda_bytes),
+            result.output_shape,
+        )
         for result in results
     ]
     return make_table(("Name", "Mean ms", "Min ms", "Max ms", "Peak CUDA", "Output"), rows)

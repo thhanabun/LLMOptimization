@@ -20,10 +20,27 @@ classifiers = [
 torch = ["torch"]
 triton = ["triton"]
 transformers = ["transformers"]
-dev = ["pytest"]
+dev = ["pytest", "ruff", "mypy", "build", "torch"]
 
 [project.scripts]
 llm-memlab = "llm_memlab.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501", "F401"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "skip"
+allow_untyped_defs = true
+check_untyped_defs = false
+warn_unused_ignores = false
+no_implicit_optional = false

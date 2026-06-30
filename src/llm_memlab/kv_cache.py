@@ -143,6 +143,7 @@ class StaticKVCache:
             raise ValueError(f"KV cache capacity exceeded: requested {end}, capacity {self.capacity}")
         return pos, end
 
+
 class PagedKVCache(StaticKVCache):
     """Block-based KV cache that stores decode positions in fixed-size pages.
 
@@ -278,6 +279,7 @@ class PagedKVCache(StaticKVCache):
                 raise ValueError("Paged KV cache has no free pages left")
             self._page_table.append(self._free_pages.pop())
 
+
 class QuantizedStaticKVCache(StaticKVCache):
     """Preallocated KV cache with int/float compressed storage modes.
 
@@ -316,7 +318,9 @@ class QuantizedStaticKVCache(StaticKVCache):
     @property
     def nbytes(self) -> int:
         tensors = [self.keys, self.values]
-        tensors.extend(tensor for tensor in (self.key_scales, self.value_scales, self.key_zero_points, self.value_zero_points) if tensor is not None)
+        tensors.extend(
+            tensor for tensor in (self.key_scales, self.value_scales, self.key_zero_points, self.value_zero_points) if tensor is not None
+        )
         return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
 
     @property
@@ -324,7 +328,9 @@ class QuantizedStaticKVCache(StaticKVCache):
         torch = require_torch()
         dtype = self.output_dtype or torch.float16
         element_size = torch.empty((), dtype=dtype).element_size()
-        elements = self.config.num_layers * self.config.batch_size * self.config.num_heads * self.config.max_seq_len * self.config.head_dim * 2
+        elements = (
+            self.config.num_layers * self.config.batch_size * self.config.num_heads * self.config.max_seq_len * self.config.head_dim * 2
+        )
         return elements * element_size
 
     def append_layer(self, layer_idx: int, key, value, position: int | None = None):
@@ -524,7 +530,9 @@ def greedy_decode(model, input_ids, config: DecodeConfig, **model_kwargs) -> Dec
             max_logit = float(logits[:, -1, :].max().item()) if config.return_token_scores else None
             token_payload: int | list[int]
             token_payload = int(next_token.item()) if next_token.numel() == 1 else [int(item) for item in next_token.tolist()]
-            steps.append(DecodeStep(index=index, token_id=token_payload, elapsed_ms=elapsed_ms, cache_tokens=cache_tokens, max_logit=max_logit))
+            steps.append(
+                DecodeStep(index=index, token_id=token_payload, elapsed_ms=elapsed_ms, cache_tokens=cache_tokens, max_logit=max_logit)
+            )
             if config.eos_token_id is not None and bool((next_token == config.eos_token_id).all().item()):
                 break
             next_input = next_token[:, None] if config.use_cache and past_key_values is not None else sequences
@@ -578,5 +586,3 @@ def _cache_length(past_key_values) -> int | None:
     if hasattr(first, "shape") and len(first.shape) >= 3:
         return int(first.shape[-2])
     return None
-
-

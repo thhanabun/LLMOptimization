@@ -330,4 +330,3 @@ def _fmt_optional_bytes(value: int | None) -> str:
     if value is None:
         return "n/a"
     return format_bytes(value)
-

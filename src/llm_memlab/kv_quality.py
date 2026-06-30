@@ -84,7 +84,9 @@ def evaluate_kv_quantization_quality(x, *, quant_dtype: str | Any = "int8", eps:
     elif dtype_name == "uint8":
         q, scale, zero_point = quantize_uint8_per_token(x, eps=eps)
         y = dequantize_uint8_per_token(q, scale, zero_point, dtype=x.dtype)
-        quantized_bytes = q.numel() * q.element_size() + scale.numel() * scale.element_size() + zero_point.numel() * zero_point.element_size()
+        quantized_bytes = (
+            q.numel() * q.element_size() + scale.numel() * scale.element_size() + zero_point.numel() * zero_point.element_size()
+        )
     else:
         stored = x.to(dtype=storage_dtype)
         y = stored.to(dtype=x.dtype)
@@ -92,7 +94,9 @@ def evaluate_kv_quantization_quality(x, *, quant_dtype: str | Any = "int8", eps:
     return _quality_result(torch, x, y, quantized_bytes=quantized_bytes, quant_dtype=dtype_name)
 
 
-def evaluate_attention_kv_quality(q, k, v, *, quant_dtype: str | Any = "int8", is_causal: bool = False, eps: float = 1e-6) -> AttentionKVQualityResult:
+def evaluate_attention_kv_quality(
+    q, k, v, *, quant_dtype: str | Any = "int8", is_causal: bool = False, eps: float = 1e-6
+) -> AttentionKVQualityResult:
     torch = _import_torch()
     dtype_name, _ = resolve_kv_storage_dtype(quant_dtype)
     k_quant = _roundtrip(k, quant_dtype=quant_dtype, eps=eps)
@@ -127,7 +131,9 @@ def _merged_kv_quality(k, v, k_quant, v_quant, *, quant_dtype: str, original_qua
     torch = _import_torch()
     original = torch.cat([k.float().flatten(), v.float().flatten()])
     restored = torch.cat([k_quant.float().flatten(), v_quant.float().flatten()])
-    quantized_bytes = _stored_bytes(k, quant_dtype=original_quant_dtype, eps=eps) + _stored_bytes(v, quant_dtype=original_quant_dtype, eps=eps)
+    quantized_bytes = _stored_bytes(k, quant_dtype=original_quant_dtype, eps=eps) + _stored_bytes(
+        v, quant_dtype=original_quant_dtype, eps=eps
+    )
     fp_bytes = k.numel() * k.element_size() + v.numel() * v.element_size()
     return _quality_result(torch, original, restored, quantized_bytes=quantized_bytes, quant_dtype=quant_dtype, fp_bytes=fp_bytes)
 
@@ -166,4 +172,3 @@ def _import_torch():
     except ImportError as exc:
         raise RuntimeError("KV quality evaluation requires PyTorch. Install with: pip install torch") from exc
     return torch
-

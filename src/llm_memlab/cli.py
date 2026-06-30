@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 from .estimates import TransformerConfig, estimate_transformer_memory, preset_config
 from .ir import GraphSpec, OperationSpec, TensorSpec
@@ -75,7 +76,6 @@ def main(argv: list[str] | None = None) -> int:
     compare_parser.add_argument("--kv-dtype", default="int8", help="KV dtype used in the quality section.")
     compare_parser.set_defaults(func=_compare_demo)
 
-
     policy_parser = subparsers.add_parser("policy-demo", help="Choose a memory-first runtime policy from a VRAM budget.")
     policy_parser.add_argument("--max-vram", default="8GB")
     policy_parser.add_argument("--preset", default="7b-like")
@@ -105,7 +105,6 @@ def main(argv: list[str] | None = None) -> int:
     compare_hf_parser.add_argument("--local-files-only", action="store_true")
     compare_hf_parser.set_defaults(func=_compare_hf)
 
-
     suite_hf_parser = subparsers.add_parser("suite-hf", help="Run prefill/generate/VRAM benchmark suite on a HF model.")
     suite_hf_parser.add_argument("--model", required=True)
     suite_hf_parser.add_argument("--prompt", default="Hello")
@@ -128,7 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     drift_hf_parser.add_argument("--dtype", default="auto")
     drift_hf_parser.add_argument("--local-files-only", action="store_true")
     drift_hf_parser.set_defaults(func=_drift_hf)
-    scoreboard_hf_parser = subparsers.add_parser("scoreboard-hf", help="Benchmark one or more HF models and write an optimization scoreboard.")
+    scoreboard_hf_parser = subparsers.add_parser(
+        "scoreboard-hf", help="Benchmark one or more HF models and write an optimization scoreboard."
+    )
     scoreboard_hf_parser.add_argument("--models", nargs="+", required=True)
     scoreboard_hf_parser.add_argument("--prompt", default="Hello")
     scoreboard_hf_parser.add_argument("--out", default="scoreboard_hf.html")
@@ -170,6 +171,72 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_hf_parser.add_argument("--local-files-only", action="store_true")
     benchmark_hf_parser.set_defaults(func=_benchmark_hf)
 
+    memory_first_hf_parser = subparsers.add_parser(
+        "memory-first-hf-bench", help="Benchmark baseline HF generate vs llm-memlab memory-first adapter."
+    )
+    memory_first_hf_parser.add_argument("--model", required=True, help="Model name or local path.")
+    memory_first_hf_parser.add_argument("--prompt", default="Hello", help="Prompt text.")
+    memory_first_hf_parser.add_argument("--tokens", type=int, default=8)
+    memory_first_hf_parser.add_argument(
+        "--adapter-tokens", type=int, help="Override memory-first adapter token count; defaults to --tokens."
+    )
+    memory_first_hf_parser.add_argument("--device", default="auto")
+    memory_first_hf_parser.add_argument("--dtype", default="auto", help="auto, fp16, bf16, or fp32")
+    memory_first_hf_parser.add_argument("--cache", choices=["quantized", "paged"], default="quantized")
+    memory_first_hf_parser.add_argument("--quant-dtype", default="int8")
+    memory_first_hf_parser.add_argument(
+        "--allow-experimental-direct-cache",
+        action="store_true",
+        help="Allow non-certified direct Transformers Cache injection for model families that default to safe fallback.",
+    )
+    memory_first_hf_parser.add_argument("--local-files-only", action="store_true")
+    memory_first_hf_parser.add_argument("--json-out")
+    memory_first_hf_parser.add_argument("--csv-out")
+    memory_first_hf_parser.add_argument("--min-token-agreement", type=float, default=1.0)
+    memory_first_hf_parser.add_argument("--max-slowdown-pct", type=float)
+    memory_first_hf_parser.add_argument("--fail-on-regression", action="store_true")
+    memory_first_hf_parser.set_defaults(func=_memory_first_hf_bench)
+
+    hf_cache_cert_parser = subparsers.add_parser(
+        "hf-cache-certify", help="Certify direct HF Cache adapter correctness with generated-token and prefill-logit gates."
+    )
+    hf_cache_cert_parser.add_argument("--model", required=True, help="Model name or local path.")
+    hf_cache_cert_parser.add_argument("--prompts", default="hello", help="Pipe-separated prompts, e.g. 'hello|Explain KV cache'.")
+    hf_cache_cert_parser.add_argument("--tokens", default="1", help="Comma-separated max_new_tokens values.")
+    hf_cache_cert_parser.add_argument("--caches", default="paged", help="Comma-separated cache modes: paged,quantized.")
+    hf_cache_cert_parser.add_argument(
+        "--experimental-caches",
+        default="",
+        help="Comma-separated cache modes to report as experimental without failing the production gate.",
+    )
+    hf_cache_cert_parser.add_argument("--quant-dtypes", default="int8", help="Comma-separated quant dtypes for quantized cache cases.")
+    hf_cache_cert_parser.add_argument("--device", default="auto")
+    hf_cache_cert_parser.add_argument("--dtype", default="auto", help="auto, fp16, bf16, or fp32")
+    hf_cache_cert_parser.add_argument("--local-files-only", action="store_true")
+    hf_cache_cert_parser.add_argument("--no-experimental-direct-cache", action="store_true")
+    hf_cache_cert_parser.add_argument("--max-logit-mean-abs", type=float, default=0.02)
+    hf_cache_cert_parser.add_argument("--min-logit-top1", type=float, default=0.98)
+    hf_cache_cert_parser.add_argument("--json-out")
+    hf_cache_cert_parser.add_argument("--csv-out")
+    hf_cache_cert_parser.add_argument("--html-out")
+    hf_cache_cert_parser.add_argument("--fail-on-regression", action="store_true")
+    hf_cache_cert_parser.set_defaults(func=_hf_cache_certify)
+
+    certify_env_parser = subparsers.add_parser(
+        "certify-env", help="Certify local hardware, backends, HF cache policy, and kernel readiness in one run."
+    )
+    certify_env_parser.add_argument("--model", help="Optional HF model path/name for cache certification.")
+    certify_env_parser.add_argument("--prompt", default="hello")
+    certify_env_parser.add_argument("--device", default="auto")
+    certify_env_parser.add_argument("--dtype", default="auto")
+    certify_env_parser.add_argument("--local-files-only", action="store_true")
+    certify_env_parser.add_argument("--skip-hf", action="store_true")
+    certify_env_parser.add_argument("--skip-kernel", action="store_true")
+    certify_env_parser.add_argument("--json-out")
+    certify_env_parser.add_argument("--html-out")
+    certify_env_parser.add_argument("--fail-on-regression", action="store_true")
+    certify_env_parser.set_defaults(func=_certify_env)
+
     kv_quality_parser = subparsers.add_parser("kv-quality-demo", help="Measure KV quantization error on random K/V-like tensors.")
     kv_quality_parser.add_argument("--tokens", type=int, default=16)
     kv_quality_parser.add_argument("--heads", type=int, default=8)
@@ -184,9 +251,83 @@ def main(argv: list[str] | None = None) -> int:
     backend_parser = subparsers.add_parser("backend-demo", help="Show available runtime backends and priorities.")
     backend_parser.set_defaults(func=_backend_demo)
 
+    benchmark_compare_parser = subparsers.add_parser("benchmark-compare", help="Compare benchmark JSON/CSV files and fail on regressions.")
+    benchmark_compare_parser.add_argument(
+        "--baseline", nargs="+", required=True, help="Baseline JSON or CSV benchmark records. Multiple files form a history median."
+    )
+    benchmark_compare_parser.add_argument(
+        "--candidate", nargs="+", required=True, help="Candidate JSON/CSV benchmark records. Multiple files are compared independently."
+    )
+    benchmark_compare_parser.add_argument(
+        "--max-slowdown-pct", type=float, default=10.0, help="Fail if candidate mean latency is slower by more than this percentage."
+    )
+    benchmark_compare_parser.add_argument(
+        "--fail-on-regression", action="store_true", help="Return exit code 1 if any comparison exceeds the threshold."
+    )
+    benchmark_compare_parser.set_defaults(func=_benchmark_compare)
+
+    fused_bench_parser = subparsers.add_parser("fused-decode-bench", help="Run a CUDA fused decode benchmark matrix with quality metrics.")
+    fused_bench_parser.add_argument("--q-heads", default="8", help="Comma-separated Q head counts.")
+    fused_bench_parser.add_argument("--kv-heads", default="8", help="Comma-separated KV head counts.")
+    fused_bench_parser.add_argument("--tokens", default="128", help="Comma-separated sequence lengths.")
+    fused_bench_parser.add_argument("--head-dim", type=int, default=64)
+    fused_bench_parser.add_argument("--dtype", default="fp16")
+    fused_bench_parser.add_argument("--quant-dtype", choices=["int8", "uint8"], default="int8")
+    fused_bench_parser.add_argument("--page-size", default="16", help="Comma-separated page sizes recorded in metadata.")
+    fused_bench_parser.add_argument("--warmup", type=int, default=3)
+    fused_bench_parser.add_argument("--repeats", type=int, default=10)
+    fused_bench_parser.add_argument("--seed", type=int, default=0)
+    fused_bench_parser.add_argument("--max-mean-abs", type=float, default=0.03)
+    fused_bench_parser.add_argument("--json-out")
+    fused_bench_parser.add_argument("--csv-out")
+    fused_bench_parser.add_argument("--html-out")
+    fused_bench_parser.add_argument("--min-speedup", type=float, default=0.0)
+    fused_bench_parser.add_argument("--fail-on-regression", action="store_true")
+    fused_bench_parser.set_defaults(func=_fused_decode_bench)
+
+    cutile_bench_parser = subparsers.add_parser("cutile-bench", help="Run torch/Triton/CuTile decode backend matrix.")
+    cutile_bench_parser.add_argument("--q-heads", type=int, default=8)
+    cutile_bench_parser.add_argument("--kv-heads", type=int, default=2)
+    cutile_bench_parser.add_argument("--tokens", type=int, default=128)
+    cutile_bench_parser.add_argument("--head-dim", type=int, default=64)
+    cutile_bench_parser.add_argument("--page-size", type=int, default=16)
+    cutile_bench_parser.add_argument("--dtype", default="fp16")
+    cutile_bench_parser.add_argument("--quant-dtype", default="int8")
+    cutile_bench_parser.add_argument("--warmup", type=int, default=3)
+    cutile_bench_parser.add_argument("--repeats", type=int, default=10)
+    cutile_bench_parser.add_argument("--seed", type=int, default=0)
+    cutile_bench_parser.add_argument("--json-out")
+    cutile_bench_parser.add_argument("--csv-out")
+    cutile_bench_parser.add_argument("--fail-on-regression", action="store_true")
+    cutile_bench_parser.set_defaults(func=_cutile_bench)
+
+    cutile_cert_parser = subparsers.add_parser("cutile-certify", help="Certify CuTile paged decode correctness and policy readiness.")
+    cutile_cert_parser.add_argument("--q-heads", type=int, default=8)
+    cutile_cert_parser.add_argument("--kv-heads", type=int, default=2)
+    cutile_cert_parser.add_argument("--tokens", type=int, default=128)
+    cutile_cert_parser.add_argument("--head-dim", type=int, default=64)
+    cutile_cert_parser.add_argument("--page-size", type=int, default=16)
+    cutile_cert_parser.add_argument("--dtype", default="fp16")
+    cutile_cert_parser.add_argument("--seed", type=int, default=0)
+    cutile_cert_parser.add_argument("--fail-on-regression", action="store_true")
+    cutile_cert_parser.set_defaults(func=_cutile_certify)
+
+    certify_parser = subparsers.add_parser(
+        "kernel-certify", help="Run the production kernel certification suite and write benchmark DB records."
+    )
+    certify_parser.add_argument("--quick", action="store_true", help="Run a small smoke matrix instead of the full shape matrix.")
+    certify_parser.add_argument("--repeats", type=int, default=5)
+    certify_parser.add_argument("--warmup", type=int, default=2)
+    certify_parser.add_argument("--seed", type=int, default=0)
+    certify_parser.add_argument("--max-mean-abs", type=float, default=0.03)
+    certify_parser.add_argument("--min-top1", type=float, default=0.90)
+    certify_parser.add_argument("--json-out")
+    certify_parser.add_argument("--csv-out")
+    certify_parser.add_argument("--fail-on-regression", action="store_true", help="Return exit code 1 if any certified case fails.")
+    certify_parser.set_defaults(func=_kernel_certify)
+
     args = parser.parse_args(argv)
     return args.func(args)
-
 
 
 def _quality_demo(args: argparse.Namespace) -> int:
@@ -211,6 +352,252 @@ def _backend_demo(args: argparse.Namespace) -> int:
 
     print(default_backend_registry().to_text())
     return 0
+
+
+def _benchmark_compare(args: argparse.Namespace) -> int:
+    from .benchmark_store import assert_no_regressions, benchmark_history, compare_record_sets, read_benchmark_files
+
+    baseline = benchmark_history(args.baseline).baseline_records()
+    all_comparisons = []
+    for candidate_path in args.candidate:
+        candidate = read_benchmark_files([candidate_path])
+        comparisons = compare_record_sets(baseline, candidate, max_slowdown_pct=args.max_slowdown_pct)
+        all_comparisons.extend(comparisons)
+        print(f"candidate={candidate_path}")
+        if not comparisons:
+            print("No matching (name, kind) benchmark records found.")
+        for comparison in comparisons:
+            print(comparison.to_text())
+        print("")
+    if args.fail_on_regression:
+        try:
+            assert_no_regressions(all_comparisons)
+        except AssertionError as exc:
+            print(str(exc))
+            return 1
+    return 0
+
+
+def _read_benchmark_records(path: str, read_json, read_csv):
+    suffix = Path(path).suffix.lower()
+    if suffix == ".json":
+        return read_json(path)
+    if suffix == ".csv":
+        return read_csv(path)
+    raise ValueError("benchmark files must end with .json or .csv")
+
+
+def _fused_decode_bench(args: argparse.Namespace) -> int:
+    from .benchmark_store import (
+        BENCHMARK_SCHEMA_VERSION,
+        BenchmarkGateConfig,
+        BenchmarkRecord,
+        collect_run_metadata,
+        write_benchmark_csv,
+        write_benchmark_json,
+    )
+    from .decode_benchmarks import benchmark_fused_decode_attention
+    from .report import make_table
+
+    records = []
+    rows = []
+    failures = []
+    for q_heads in _csv_ints(args.q_heads):
+        for kv_heads in _csv_ints(args.kv_heads):
+            if q_heads % kv_heads != 0:
+                continue
+            for tokens in _csv_ints(args.tokens):
+                for page_size in _csv_ints(args.page_size):
+                    result = benchmark_fused_decode_attention(
+                        q_heads=q_heads,
+                        kv_heads=kv_heads,
+                        tokens=tokens,
+                        head_dim=args.head_dim,
+                        dtype=args.dtype,
+                        quant_dtype=args.quant_dtype,
+                        repeats=args.repeats,
+                        warmup=args.warmup,
+                        seed=args.seed,
+                    )
+                    name = f"fused_decode/q{q_heads}/kv{kv_heads}/t{tokens}/d{args.head_dim}/{args.quant_dtype}/p{page_size}"
+                    metadata = collect_run_metadata(
+                        dtype=args.dtype,
+                        sequence_length=tokens,
+                        warmup=args.warmup,
+                        repeats=args.repeats,
+                        seed=args.seed,
+                        backend="triton-experimental",
+                    )
+                    quality_passed = bool(result.quality.passed and result.quality.mean_abs_error <= args.max_mean_abs)
+                    fused_extra = {
+                        "schema_version": BENCHMARK_SCHEMA_VERSION,
+                        "speedup": result.speedup,
+                        "quality_passed": quality_passed,
+                        "mean_abs": result.quality.mean_abs_error,
+                        "page_size": page_size,
+                        "warmup": args.warmup,
+                        "repeats": args.repeats,
+                        "seed": args.seed,
+                        "backend": "triton-experimental",
+                    }
+                    ref_extra = {"page_size": page_size}
+                    records.append(
+                        BenchmarkRecord(
+                            name=name + ":fused",
+                            kind="decode",
+                            mean_ms=result.fused.mean_ms,
+                            min_ms=result.fused.min_ms,
+                            max_ms=result.fused.max_ms,
+                            peak_cuda_bytes=result.fused.peak_cuda_bytes,
+                            extra=fused_extra,
+                            metadata=metadata.__dict__,
+                        )
+                    )
+                    records.append(
+                        BenchmarkRecord(
+                            name=name + ":dequant_sdpa",
+                            kind="decode",
+                            mean_ms=result.dequant_sdpa.mean_ms,
+                            min_ms=result.dequant_sdpa.min_ms,
+                            max_ms=result.dequant_sdpa.max_ms,
+                            peak_cuda_bytes=result.dequant_sdpa.peak_cuda_bytes,
+                            extra=ref_extra,
+                            metadata=metadata.__dict__,
+                        )
+                    )
+                    gate = BenchmarkGateConfig(min_speedup=args.min_speedup, max_quality_mean_abs=args.max_mean_abs)
+                    passed = quality_passed and result.speedup >= (gate.min_speedup or 0.0)
+                    if not passed:
+                        failures.append(name)
+                    rows.append(
+                        (
+                            name,
+                            f"{result.fused.mean_ms:.3f}",
+                            f"{result.dequant_sdpa.mean_ms:.3f}",
+                            f"{result.speedup:.3f}x",
+                            quality_passed,
+                            f"{result.quality.mean_abs_error:.6f}",
+                            "PASS" if passed else "FAIL",
+                        )
+                    )
+    print(make_table(("Case", "Fused ms", "Ref ms", "Speedup", "Quality", "Mean abs", "Status"), rows))
+    if args.json_out:
+        print(f"Benchmark JSON written to {write_benchmark_json(records, args.json_out)}")
+    if args.csv_out:
+        print(f"Benchmark CSV written to {write_benchmark_csv(records, args.csv_out)}")
+    if args.html_out:
+        path = _write_fused_bench_html(rows, args.html_out)
+        print(f"Benchmark HTML written to {path}")
+    if failures and args.fail_on_regression:
+        print("Fused decode regression threshold failed: " + ", ".join(failures))
+        return 1
+    return 0
+
+
+def _csv_ints(value: str) -> list[int]:
+    return [int(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def _write_fused_bench_html(rows, path: str):
+    output = Path(path)
+    html_rows = "".join(
+        f"<tr><td>{case}</td><td>{fused}</td><td>{ref}</td><td>{speed}</td><td>{quality}</td><td>{mean_abs}</td><td>{status}</td></tr>"
+        for case, fused, ref, speed, quality, mean_abs, status in rows
+    )
+    output.write_text(
+        f"""<!doctype html><html><head><meta charset='utf-8'><title>llm-memlab fused decode benchmark</title><style>body{{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#17202a}}table{{border-collapse:collapse;width:100%;font-size:13px}}td,th{{border-bottom:1px solid #e5e9f0;padding:8px;text-align:left}}</style></head><body><h1>Fused decode benchmark</h1><table><thead><tr><th>Case</th><th>Fused ms</th><th>Ref ms</th><th>Speedup</th><th>Quality</th><th>Mean abs</th><th>Status</th></tr></thead><tbody>{html_rows}</tbody></table></body></html>""",
+        encoding="utf-8",
+    )
+    return output
+
+
+def _kernel_certify(args: argparse.Namespace) -> int:
+    from .kernel_certification import certify_quantized_attention
+
+    report = certify_quantized_attention(
+        quick=args.quick,
+        repeats=args.repeats,
+        warmup=args.warmup,
+        seed=args.seed,
+        max_mean_abs=args.max_mean_abs,
+        min_top1=args.min_top1,
+    )
+    print(report.to_text())
+    if args.json_out:
+        print(f"Certification JSON written to {report.write_json(args.json_out)}")
+    if args.csv_out:
+        print(f"Certification CSV written to {report.write_csv(args.csv_out)}")
+    if args.fail_on_regression and not report.passed:
+        return 1
+    return 0
+
+
+def _cutile_bench(args: argparse.Namespace) -> int:
+    try:
+        from .benchmark_store import write_benchmark_csv, write_benchmark_json
+        from .decode_benchmarks import benchmark_decode_backend_matrix
+    except RuntimeError as exc:
+        print(str(exc))
+        return 2
+    try:
+        result = benchmark_decode_backend_matrix(
+            q_heads=args.q_heads,
+            kv_heads=args.kv_heads,
+            tokens=args.tokens,
+            head_dim=args.head_dim,
+            page_size=args.page_size,
+            dtype=args.dtype,
+            quant_dtype=args.quant_dtype,
+            warmup=args.warmup,
+            repeats=args.repeats,
+            seed=args.seed,
+        )
+    except Exception as exc:
+        print(f"Could not run CuTile benchmark matrix: {exc}")
+        return 2
+    print(result.to_text())
+    if args.json_out:
+        print(f"Benchmark JSON written to {write_benchmark_json(result.records, args.json_out)}")
+    if args.csv_out:
+        print(f"Benchmark CSV written to {write_benchmark_csv(result.records, args.csv_out)}")
+    if args.fail_on_regression and not result.passed:
+        return 1
+    return 0
+
+
+def _cutile_certify(args: argparse.Namespace) -> int:
+    try:
+        import torch
+
+        from .backends.cutile import certify_cutile_decode_attention
+    except Exception as exc:
+        print(f"Could not import CuTile certification dependencies: {exc}")
+        return 2
+    if not torch.cuda.is_available():
+        print("CuTile certification requires CUDA")
+        return 2
+    if args.q_heads % args.kv_heads != 0:
+        print("q_heads must be divisible by kv_heads")
+        return 2
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch_dtype = (
+        torch.float16 if args.dtype in {"fp16", "float16"} else torch.bfloat16 if args.dtype in {"bf16", "bfloat16"} else torch.float32
+    )
+    q = torch.randn(1, args.q_heads, 1, args.head_dim, device="cuda", dtype=torch_dtype)
+    num_pages = (args.tokens + args.page_size - 1) // args.page_size
+    k_pages = torch.randn(1, args.kv_heads, num_pages, args.page_size, args.head_dim, device="cuda", dtype=torch_dtype)
+    v_pages = torch.randn_like(k_pages)
+    page_table = torch.arange(num_pages, device="cuda", dtype=torch.long).view(1, num_pages)
+    lengths = torch.tensor([args.tokens], device="cuda", dtype=torch.long)
+    result = certify_cutile_decode_attention(q, k_pages, v_pages, page_table, lengths, page_size=args.page_size)
+    print(result.info.to_text())
+    print("")
+    print(result.to_text())
+    if args.fail_on_regression and not result.passed:
+        return 1
+    return 0
+
 
 def _estimate(args: argparse.Namespace) -> int:
     if all(value is not None for value in (args.layers, args.hidden, args.intermediate, args.heads, args.vocab)):
@@ -386,10 +773,6 @@ def _decode_demo(args: argparse.Namespace) -> int:
     return 0
 
 
-
-
-
-
 def _cache_demo(args: argparse.Namespace) -> int:
     try:
         import torch
@@ -408,6 +791,7 @@ def _cache_demo(args: argparse.Namespace) -> int:
             cache.append_layer(layer, key, value, position=pos)
     print(cache.stats().to_text())
     return 0
+
 
 def _patch_demo(args: argparse.Namespace) -> int:
     try:
@@ -500,8 +884,6 @@ def _benchmark_demo(args: argparse.Namespace) -> int:
     ]
     print(compare_benchmarks(results))
     return 0
-
-
 
 
 def _compare_demo(args: argparse.Namespace) -> int:
@@ -681,7 +1063,9 @@ def _compare_hf(args: argparse.Namespace) -> int:
     v = torch.randn(1, 4, 16, 32, device=device, dtype=q.dtype)
     kv_quality = evaluate_attention_kv_quality(q, k, v, quant_dtype=args.kv_dtype)
     info = inspect_model(baseline)
-    policy = choose_memory_policy(max_vram=args.max_vram, model_info=info, sequence_length=getattr(encoded.get("input_ids"), "shape", [None, None])[-1])
+    policy = choose_memory_policy(
+        max_vram=args.max_vram, model_info=info, sequence_length=getattr(encoded.get("input_ids"), "shape", [None, None])[-1]
+    )
     opt_report = OptimizationReport(
         title=f"llm-memlab compare: {args.model}",
         benchmarks=benchmarks,
@@ -711,7 +1095,6 @@ def _compare_hf(args: argparse.Namespace) -> int:
     return 0
 
 
-
 def _suite_hf(args: argparse.Namespace) -> int:
     try:
         from transformers import AutoTokenizer
@@ -732,11 +1115,15 @@ def _suite_hf(args: argparse.Namespace) -> int:
     encoded = tokenizer(args.prompt, return_tensors="pt")
     if args.device:
         encoded = {key: value.to(args.device) for key, value in encoded.items()}
-    result = benchmark_inference_suite(model, encoded, model_name=args.model, max_new_tokens=args.tokens, config=BenchmarkConfig(warmup=1, repeats=args.repeats))
+    result = benchmark_inference_suite(
+        model, encoded, model_name=args.model, max_new_tokens=args.tokens, config=BenchmarkConfig(warmup=1, repeats=args.repeats)
+    )
     if args.json_out or args.csv_out:
-        from .benchmark_store import records_from_suite, write_benchmark_csv, write_benchmark_json
+        from .benchmark_store import collect_run_metadata, records_from_suite, write_benchmark_csv, write_benchmark_json
 
-        records = records_from_suite(result)
+        seq_len = int(getattr(encoded.get("input_ids"), "shape", [0, 0])[-1]) if isinstance(encoded, dict) else None
+        metadata = collect_run_metadata(dtype=args.dtype, sequence_length=seq_len)
+        records = records_from_suite(result, metadata=metadata)
         if args.json_out:
             print(f"Benchmark JSON written to {write_benchmark_json(records, args.json_out)}")
         if args.csv_out:
@@ -790,6 +1177,7 @@ def _drift_hf(args: argparse.Namespace) -> int:
     print(report.to_text(limit=32))
     return 0
 
+
 def _scoreboard_hf(args: argparse.Namespace) -> int:
     try:
         import torch
@@ -819,21 +1207,35 @@ def _scoreboard_hf(args: argparse.Namespace) -> int:
             optimized_bench = benchmark_callable(f"{model_name}:optimized", lambda: optimized(**encoded), cfg)
             info = inspect_model(baseline)
             speedup = baseline_bench.mean_ms / optimized_bench.mean_ms if optimized_bench.mean_ms else 0.0
-            rows.append({
-                "model": model_name,
-                "baseline_ms": baseline_bench.mean_ms,
-                "optimized_ms": optimized_bench.mean_ms,
-                "speedup": speedup,
-                "patched": patch_report.total_patched,
-                "params": info.parameter_count,
-                "status": "ok",
-            })
+            rows.append(
+                {
+                    "model": model_name,
+                    "baseline_ms": baseline_bench.mean_ms,
+                    "optimized_ms": optimized_bench.mean_ms,
+                    "speedup": speedup,
+                    "patched": patch_report.total_patched,
+                    "params": info.parameter_count,
+                    "status": "ok",
+                }
+            )
         except Exception as exc:
             rows.append({"model": model_name, "status": f"error: {exc}"})
-    print(make_table(("Model", "Status", "Base ms", "Opt ms", "Speed", "Patched"), [
-        (row.get("model"), row.get("status"), _fmt_float(row.get("baseline_ms")), _fmt_float(row.get("optimized_ms")), _fmt_speed(row.get("speedup")), row.get("patched", ""))
-        for row in rows
-    ]))
+    print(
+        make_table(
+            ("Model", "Status", "Base ms", "Opt ms", "Speed", "Patched"),
+            [
+                (
+                    row.get("model"),
+                    row.get("status"),
+                    _fmt_float(row.get("baseline_ms")),
+                    _fmt_float(row.get("optimized_ms")),
+                    _fmt_speed(row.get("speedup")),
+                    row.get("patched", ""),
+                )
+                for row in rows
+            ],
+        )
+    )
     if args.json_out or args.csv_out:
         from .benchmark_store import BenchmarkRecord, write_benchmark_csv, write_benchmark_json
 
@@ -914,6 +1316,7 @@ def _fmt_float(value) -> str:
 
 def _fmt_speed(value) -> str:
     return "" if value is None else f"{value:.2f}x"
+
 
 def _inspect_demo(args: argparse.Namespace) -> int:
     try:
@@ -1008,6 +1411,110 @@ def _benchmark_hf(args: argparse.Namespace) -> int:
     return 0
 
 
+def _memory_first_hf_bench(args: argparse.Namespace) -> int:
+    try:
+        from .hf_runtime import assert_hf_benchmark_passed, benchmark_memory_first_hf_generate
+    except RuntimeError as exc:
+        print(str(exc))
+        return 2
+
+    try:
+        result = benchmark_memory_first_hf_generate(
+            args.model,
+            prompt=args.prompt,
+            max_new_tokens=args.tokens,
+            adapter_tokens=args.adapter_tokens,
+            device=args.device,
+            dtype=args.dtype,
+            local_files_only=args.local_files_only,
+            cache=args.cache,
+            quant_dtype=args.quant_dtype,
+            allow_experimental_direct_cache=args.allow_experimental_direct_cache,
+        )
+    except Exception as exc:
+        print(f"Could not run HF memory-first benchmark: {exc}")
+        return 2
+    print(result.to_text())
+    if args.json_out:
+        print(f"Benchmark JSON written to {result.write_json(args.json_out)}")
+    if args.csv_out:
+        print(f"Benchmark CSV written to {result.write_csv(args.csv_out)}")
+    if args.fail_on_regression:
+        try:
+            assert_hf_benchmark_passed(result, min_token_agreement=args.min_token_agreement, max_slowdown_pct=args.max_slowdown_pct)
+        except AssertionError as exc:
+            print(str(exc))
+            return 1
+    return 0
+
+
+def _hf_cache_certify(args: argparse.Namespace) -> int:
+    try:
+        from .hf_cache_certification import assert_hf_cache_certified, certify_hf_cache
+    except RuntimeError as exc:
+        print(str(exc))
+        return 2
+
+    try:
+        report = certify_hf_cache(
+            args.model,
+            prompts=[item for item in args.prompts.split("|") if item],
+            token_counts=_csv_ints(args.tokens),
+            caches=[item.strip() for item in args.caches.split(",") if item.strip()],
+            experimental_caches=[item.strip() for item in args.experimental_caches.split(",") if item.strip()],
+            quant_dtypes=[item.strip() for item in args.quant_dtypes.split(",") if item.strip()],
+            device=args.device,
+            dtype=args.dtype,
+            local_files_only=args.local_files_only,
+            allow_experimental_direct_cache=not args.no_experimental_direct_cache,
+            max_logit_mean_abs=args.max_logit_mean_abs,
+            min_logit_top1=args.min_logit_top1,
+        )
+    except Exception as exc:
+        print(f"Could not run HF cache certification: {exc}")
+        return 2
+    print(report.to_text())
+    if args.json_out:
+        print(f"Certification JSON written to {report.write_json(args.json_out)}")
+    if args.csv_out:
+        print(f"Certification CSV written to {report.write_csv(args.csv_out)}")
+    if args.html_out:
+        print(f"Certification HTML written to {report.write_html(args.html_out)}")
+    if args.fail_on_regression:
+        try:
+            assert_hf_cache_certified(report)
+        except AssertionError as exc:
+            print(str(exc))
+            return 1
+    return 0
+
+
+def _certify_env(args: argparse.Namespace) -> int:
+    from .env_certification import certify_environment
+
+    try:
+        report = certify_environment(
+            model=args.model,
+            prompts=(args.prompt,),
+            device=args.device,
+            dtype=args.dtype,
+            local_files_only=args.local_files_only,
+            run_hf=not args.skip_hf,
+            run_kernel=not args.skip_kernel,
+        )
+    except Exception as exc:
+        print(f"Could not certify environment: {exc}")
+        return 2
+    print(report.to_text())
+    if args.json_out:
+        print(f"Environment certification JSON written to {report.write_json(args.json_out)}")
+    if args.html_out:
+        print(f"Environment certification HTML written to {report.write_html(args.html_out)}")
+    if args.fail_on_regression and not report.passed:
+        return 1
+    return 0
+
+
 def _kv_quality_demo(args: argparse.Namespace) -> int:
     try:
         import torch
@@ -1026,6 +1533,7 @@ def _kv_quality_demo(args: argparse.Namespace) -> int:
     else:
         print(evaluate_kv_quantization_quality(x, quant_dtype=args.dtype).to_text())
     return 0
+
 
 def _bench(torch, fn, repeats: int) -> float:
     repeats = max(1, repeats)
@@ -1061,4 +1569,3 @@ def _toy_block_graph(seq: int, hidden: int, intermediate: int, dtype: str) -> Gr
     graph.add_op(OperationSpec.make("mlp_down", "linear", ("mlp_up", "w_mlp_down"), ("mlp_down",)))
     graph.add_op(OperationSpec.make("residual", "add", ("x", "mlp_down"), ("out",)))
     return graph
-

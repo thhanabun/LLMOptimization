@@ -74,10 +74,14 @@ def _benchmark_html(results: list[BenchmarkResult]) -> str:
         rows.append(
             f"<tr><td>{_e(result.name)}</td><td>{result.mean_ms:.3f}</td><td>{result.min_ms:.3f}</td><td>{result.max_ms:.3f}</td><td>{speedup:.2f}x</td><td>{_e(result.output_shape)}</td><td>{_e(_fmt_peak(result.peak_cuda_bytes))}</td></tr>"
         )
-    return """
+    return (
+        """
 <section>
 <h2>Benchmark</h2>
-<table><thead><tr><th>Name</th><th>Mean ms</th><th>Min ms</th><th>Max ms</th><th>Speed vs baseline</th><th>Output</th><th>Peak CUDA</th></tr></thead><tbody>""" + "".join(rows) + "</tbody></table></section>"
+<table><thead><tr><th>Name</th><th>Mean ms</th><th>Min ms</th><th>Max ms</th><th>Speed vs baseline</th><th>Output</th><th>Peak CUDA</th></tr></thead><tbody>"""
+        + "".join(rows)
+        + "</tbody></table></section>"
+    )
 
 
 def _patch_html(patch_report: Any) -> str:
@@ -105,7 +109,11 @@ def _trace_compare_html(baseline_trace: Any, optimized_trace: Any) -> str:
         rows.append(
             f"<tr><td>{label}</td><td>{getattr(trace, 'total_ms', 0.0):.3f}</td><td>{len(records)}</td><td>{format_bytes(sum(getattr(r, 'output_bytes', 0) for r in records))}</td><td>{_e(_hot_layers(trace))}</td></tr>"
         )
-    return "<section><h2>Trace summary</h2><table><thead><tr><th>Run</th><th>Total ms</th><th>Layers</th><th>Output bytes</th><th>Hot layers</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></section>"
+    return (
+        "<section><h2>Trace summary</h2><table><thead><tr><th>Run</th><th>Total ms</th><th>Layers</th><th>Output bytes</th><th>Hot layers</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table></section>"
+    )
 
 
 def _kv_quality_html(kv_quality: Any) -> str:
@@ -162,7 +170,11 @@ def _attention_stats_html(attention_stats: tuple[Any, ...]) -> str:
         f"<tr><td>{_e(item.name)}</td><td>{item.entropy:.4f}</td><td>{item.max_probability:.4f}</td><td>{item.dead_head_fraction:.1%}</td><td>{_e(item.shape)}</td></tr>"
         for item in attention_stats
     )
-    return "<section><h2>Attention debugger</h2><table><thead><tr><th>Layer</th><th>Entropy</th><th>Max prob</th><th>Dead heads</th><th>Shape</th></tr></thead><tbody>" + rows + "</tbody></table></section>"
+    return (
+        "<section><h2>Attention debugger</h2><table><thead><tr><th>Layer</th><th>Entropy</th><th>Max prob</th><th>Dead heads</th><th>Shape</th></tr></thead><tbody>"
+        + rows
+        + "</tbody></table></section>"
+    )
 
 
 def scoreboard_to_html(rows: list[dict[str, Any]], *, title: str = "llm-memlab scoreboard") -> str:
@@ -193,7 +205,7 @@ th {{ background:#f6f8fb; }}
 </head>
 <body>
 <h1>{_e(title)}</h1>
-<table><thead><tr><th>Model</th><th>Status</th><th>Baseline ms</th><th>Optimized ms</th><th>Speed</th><th>Patched</th><th>Params</th></tr></thead><tbody>{''.join(body)}</tbody></table>
+<table><thead><tr><th>Model</th><th>Status</th><th>Baseline ms</th><th>Optimized ms</th><th>Speed</th><th>Patched</th><th>Params</th></tr></thead><tbody>{"".join(body)}</tbody></table>
 </body>
 </html>"""
 

@@ -91,7 +91,9 @@ def analyze_qk_attention(module: Any, hidden_states, *, name: str = "attention")
 
 
 def attention_stats_to_text(stats: tuple[AttentionStats, ...]) -> str:
-    rows = [(item.name, item.shape, f"{item.entropy:.6f}", f"{item.max_probability:.6f}", f"{item.dead_head_fraction:.1%}") for item in stats]
+    rows = [
+        (item.name, item.shape, f"{item.entropy:.6f}", f"{item.max_probability:.6f}", f"{item.dead_head_fraction:.1%}") for item in stats
+    ]
     return make_table(("Layer", "Shape", "Entropy", "Max prob", "Dead heads"), rows)
 
 

@@ -51,13 +51,20 @@ class OptimizationReport:
         if summary_rows:
             parts.extend(["", "Optimization summary", make_table(("Metric", "Value"), summary_rows)])
         if self.memory_policy is not None:
-            parts.extend(["", "Memory policy", self.memory_policy.to_text() if hasattr(self.memory_policy, "to_text") else str(self.memory_policy)])
+            parts.extend(
+                ["", "Memory policy", self.memory_policy.to_text() if hasattr(self.memory_policy, "to_text") else str(self.memory_policy)]
+            )
         if self.patch_report is not None:
-            parts.extend(["", "Patch report", self.patch_report.to_text() if hasattr(self.patch_report, "to_text") else str(self.patch_report)])
+            parts.extend(
+                ["", "Patch report", self.patch_report.to_text() if hasattr(self.patch_report, "to_text") else str(self.patch_report)]
+            )
         if self.kv_quality is not None:
             parts.extend(["", "KV quality", self.kv_quality.to_text() if hasattr(self.kv_quality, "to_text") else str(self.kv_quality)])
         if self.attention_stats:
-            rows = [(item.name, f"{item.entropy:.4f}", f"{item.max_probability:.4f}", f"{item.dead_head_fraction:.1%}") for item in self.attention_stats]
+            rows = [
+                (item.name, f"{item.entropy:.4f}", f"{item.max_probability:.4f}", f"{item.dead_head_fraction:.1%}")
+                for item in self.attention_stats
+            ]
             parts.extend(["", "Attention stats", make_table(("Layer", "Entropy", "Max prob", "Dead heads"), rows)])
         findings = self.findings or infer_findings(self)
         if findings:
@@ -73,9 +80,15 @@ def infer_findings(report: OptimizationReport) -> tuple[OptimizationFinding, ...
         patched = getattr(report.patch_report, "total_patched", 0)
         findings.append(OptimizationFinding("patch", f"patched {patched} modules", "kernel/runtime coverage"))
         if skipped:
-            findings.append(OptimizationFinding("patch", f"{len(skipped)} modules skipped", "check unsupported layouts before expecting speedup"))
+            findings.append(
+                OptimizationFinding("patch", f"{len(skipped)} modules skipped", "check unsupported layouts before expecting speedup")
+            )
     if report.kv_quality is not None and hasattr(report.kv_quality, "compression_ratio"):
-        findings.append(OptimizationFinding("kv-cache", f"compression {report.kv_quality.compression_ratio:.2f}x", "memory reduction with measured output drift"))
+        findings.append(
+            OptimizationFinding(
+                "kv-cache", f"compression {report.kv_quality.compression_ratio:.2f}x", "memory reduction with measured output drift"
+            )
+        )
     speedup = report.speedup()
     if speedup is not None:
         verdict = "faster" if speedup >= 1 else "slower"
@@ -83,7 +96,11 @@ def infer_findings(report: OptimizationReport) -> tuple[OptimizationFinding, ...
     if report.baseline_trace is not None:
         hot = report.baseline_trace.slowest(1)
         if hot:
-            findings.append(OptimizationFinding("debug", f"hot layer: {hot[0].name}", f"{hot[0].elapsed_ms:.3f} ms, {format_bytes(hot[0].output_bytes)} output"))
+            findings.append(
+                OptimizationFinding(
+                    "debug", f"hot layer: {hot[0].name}", f"{hot[0].elapsed_ms:.3f} ms, {format_bytes(hot[0].output_bytes)} output"
+                )
+            )
     return tuple(findings)
 
 

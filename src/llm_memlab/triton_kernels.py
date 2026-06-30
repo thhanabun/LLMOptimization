@@ -197,13 +197,13 @@ def triton_dequantize_int8_per_token(q, scale, *, dtype=None):
         return dequantize_int8_per_token(q, scale, dtype=dtype)
 
     @triton.jit
-    def _kernel(Q, S, O, D: tl.constexpr, BLOCK: tl.constexpr):
+    def _kernel(Q, S, OUT, D: tl.constexpr, BLOCK: tl.constexpr):
         row = tl.program_id(0)
         offsets = tl.arange(0, BLOCK)
         mask = offsets < D
         qv = tl.load(Q + row * D + offsets, mask=mask, other=0).to(tl.float32)
         sc = tl.load(S + row).to(tl.float32)
-        tl.store(O + row * D + offsets, qv * sc, mask=mask)
+        tl.store(OUT + row * D + offsets, qv * sc, mask=mask)
 
     _kernel[(q_flat.shape[0],)](q_flat, scale_flat, out, dim, BLOCK=block)
     return out.view(original_shape)
@@ -281,14 +281,14 @@ def triton_dequantize_uint8_per_token(q, scale, zero_point, *, dtype=None):
         return dequantize_uint8_per_token(q, scale, zero_point, dtype=dtype)
 
     @triton.jit
-    def _kernel(Q, S, Z, O, D: tl.constexpr, BLOCK: tl.constexpr):
+    def _kernel(Q, S, Z, OUT, D: tl.constexpr, BLOCK: tl.constexpr):
         row = tl.program_id(0)
         offsets = tl.arange(0, BLOCK)
         mask = offsets < D
         qv = tl.load(Q + row * D + offsets, mask=mask, other=0).to(tl.float32)
         sc = tl.load(S + row).to(tl.float32)
         zp = tl.load(Z + row).to(tl.float32)
-        tl.store(O + row * D + offsets, (qv - zp) * sc, mask=mask)
+        tl.store(OUT + row * D + offsets, (qv - zp) * sc, mask=mask)
 
     _kernel[(q_flat.shape[0],)](q_flat, scale_flat, zp_flat, out, dim, BLOCK=block)
     return out.view(original_shape)
@@ -297,16 +297,20 @@ def triton_dequantize_uint8_per_token(q, scale, zero_point, *, dtype=None):
 def triton_fused_int8_kv_attention(q, k_q, k_scale, v_q, v_scale, *, scale=None, is_causal: bool = False):
     """Decode attention that dequantizes int8 K/V inside a Triton softmax kernel.
 
-    Supported fast path: q [B,H,1,D], quantized K/V [B,H,T,D], per-token
-    scales [B,H,T,1]. Other layouts fall back to dequantize+SDPA.
+    Fast path supports single-token non-causal decode with MHA/GQA/MQA layouts:
+    q [B,QH,1,D], quantized K/V [B,KVH,T,D], per-token scales [B,KVH,T,1].
     """
 
     torch = require_torch()
-    if not _supports_fused_decode(q, k_q, v_q, k_scale, v_scale):
+    if is_causal or not _supports_fused_decode(q, k_q, v_q, k_scale, v_scale):
         from .kv_cache import dequantize_int8_per_token
 
         k = dequantize_int8_per_token(k_q, k_scale, dtype=q.dtype)
         v = dequantize_int8_per_token(v_q, v_scale, dtype=q.dtype)
+        if _can_repeat_kv_for_gqa(q, k):
+            repeat = q.shape[1] // k.shape[1]
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
 
     import triton
@@ -317,7 +321,8 @@ def triton_fused_int8_kv_attention(q, k_q, k_scale, v_q, v_scale, *, scale=None,
     v_c = v_q.contiguous()
     ks_c = k_scale.contiguous()
     vs_c = v_scale.contiguous()
-    batch, heads, _, dim = q_c.shape
+    batch, q_heads, _, dim = q_c.shape
+    kv_heads = k_c.shape[1]
     tokens = k_c.shape[-2]
     block_d = triton.next_power_of_2(dim)
     block_t = triton.next_power_of_2(tokens)
@@ -326,31 +331,59 @@ def triton_fused_int8_kv_attention(q, k_q, k_scale, v_q, v_scale, *, scale=None,
 
         k = dequantize_int8_per_token(k_q, k_scale, dtype=q.dtype)
         v = dequantize_int8_per_token(v_q, v_scale, dtype=q.dtype)
+        if q_heads != kv_heads:
+            repeat = q_heads // kv_heads
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
     out = torch.empty_like(q_c)
-    sm_scale = float(scale) if scale is not None else dim ** -0.5
+    sm_scale = float(scale) if scale is not None else dim**-0.5
+    group = q_heads // kv_heads
 
     @triton.jit
-    def _kernel(Q, KQ, KS, VQ, VS, O, T: tl.constexpr, D: tl.constexpr, SM: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr):
+    def _kernel(
+        Q,
+        KQ,
+        KS,
+        VQ,
+        VS,
+        OUT,
+        QH: tl.constexpr,
+        KVH: tl.constexpr,
+        T: tl.constexpr,
+        D: tl.constexpr,
+        GROUP: tl.constexpr,
+        SM: tl.constexpr,
+        BT: tl.constexpr,
+        BD: tl.constexpr,
+    ):
         row = tl.program_id(0)
+        b = row // QH
+        qh = row - b * QH
+        kvh = qh // GROUP
+        kv_row = b * KVH + kvh
         offs_t = tl.arange(0, BT)
         offs_d = tl.arange(0, BD)
-        row_td = row * T * D
-        row_t = row * T
         q_vals = tl.load(Q + row * D + offs_d, mask=offs_d < D, other=0.0).to(tl.float32)
-        k_vals = tl.load(KQ + row_td + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0).to(tl.float32)
-        k_scales = tl.load(KS + row_t + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
+        kv_base = kv_row * T * D
+        scale_base = kv_row * T
+        k_vals = tl.load(
+            KQ + kv_base + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0
+        ).to(tl.float32)
+        k_scales = tl.load(KS + scale_base + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
         scores = tl.sum(q_vals[None, :] * k_vals * k_scales[:, None], axis=1) * SM
         scores = tl.where(offs_t < T, scores, -3.4028234663852886e38)
         scores = scores - tl.max(scores, axis=0)
         probs = tl.exp(scores)
         denom = tl.sum(probs, axis=0)
-        v_vals = tl.load(VQ + row_td + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0).to(tl.float32)
-        v_scales = tl.load(VS + row_t + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
+        v_vals = tl.load(
+            VQ + kv_base + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0
+        ).to(tl.float32)
+        v_scales = tl.load(VS + scale_base + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
         acc = tl.sum((probs / denom)[:, None] * v_vals * v_scales[:, None], axis=0)
-        tl.store(O + row * D + offs_d, acc, mask=offs_d < D)
+        tl.store(OUT + row * D + offs_d, acc, mask=offs_d < D)
 
-    _kernel[(batch * heads,)](q_c, k_c, ks_c, v_c, vs_c, out, tokens, dim, sm_scale, BT=block_t, BD=block_d)
+    _kernel[(batch * q_heads,)](q_c, k_c, ks_c, v_c, vs_c, out, q_heads, kv_heads, tokens, dim, group, sm_scale, BT=block_t, BD=block_d)
     return out.view_as(q)
 
 
@@ -358,11 +391,15 @@ def triton_fused_uint8_kv_attention(q, k_q, k_scale, k_zero_point, v_q, v_scale,
     """Decode attention that dequantizes asymmetric uint8 K/V inside Triton."""
 
     torch = require_torch()
-    if not _supports_fused_decode(q, k_q, v_q, k_scale, v_scale):
+    if is_causal or not _supports_fused_decode(q, k_q, v_q, k_scale, v_scale):
         from .kv_cache import dequantize_uint8_per_token
 
         k = dequantize_uint8_per_token(k_q, k_scale, k_zero_point, dtype=q.dtype)
         v = dequantize_uint8_per_token(v_q, v_scale, v_zero_point, dtype=q.dtype)
+        if _can_repeat_kv_for_gqa(q, k):
+            repeat = q.shape[1] // k.shape[1]
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
 
     import triton
@@ -375,7 +412,8 @@ def triton_fused_uint8_kv_attention(q, k_q, k_scale, k_zero_point, v_q, v_scale,
     vs_c = v_scale.contiguous()
     kz_c = k_zero_point.contiguous()
     vz_c = v_zero_point.contiguous()
-    batch, heads, _, dim = q_c.shape
+    batch, q_heads, _, dim = q_c.shape
+    kv_heads = k_c.shape[1]
     tokens = k_c.shape[-2]
     block_d = triton.next_power_of_2(dim)
     block_t = triton.next_power_of_2(tokens)
@@ -384,34 +422,498 @@ def triton_fused_uint8_kv_attention(q, k_q, k_scale, k_zero_point, v_q, v_scale,
 
         k = dequantize_uint8_per_token(k_q, k_scale, k_zero_point, dtype=q.dtype)
         v = dequantize_uint8_per_token(v_q, v_scale, v_zero_point, dtype=q.dtype)
+        if q_heads != kv_heads:
+            repeat = q_heads // kv_heads
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
     out = torch.empty_like(q_c)
-    sm_scale = float(scale) if scale is not None else dim ** -0.5
+    sm_scale = float(scale) if scale is not None else dim**-0.5
+    group = q_heads // kv_heads
 
     @triton.jit
-    def _kernel(Q, KQ, KS, KZ, VQ, VS, VZ, O, T: tl.constexpr, D: tl.constexpr, SM: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr):
+    def _kernel(
+        Q,
+        KQ,
+        KS,
+        KZ,
+        VQ,
+        VS,
+        VZ,
+        OUT,
+        QH: tl.constexpr,
+        KVH: tl.constexpr,
+        T: tl.constexpr,
+        D: tl.constexpr,
+        GROUP: tl.constexpr,
+        SM: tl.constexpr,
+        BT: tl.constexpr,
+        BD: tl.constexpr,
+    ):
         row = tl.program_id(0)
+        b = row // QH
+        qh = row - b * QH
+        kvh = qh // GROUP
+        kv_row = b * KVH + kvh
         offs_t = tl.arange(0, BT)
         offs_d = tl.arange(0, BD)
-        row_td = row * T * D
-        row_t = row * T
         q_vals = tl.load(Q + row * D + offs_d, mask=offs_d < D, other=0.0).to(tl.float32)
-        k_raw = tl.load(KQ + row_td + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0).to(tl.float32)
-        k_scales = tl.load(KS + row_t + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
-        k_zp = tl.load(KZ + row_t + offs_t, mask=offs_t < T, other=0).to(tl.float32)
+        kv_base = kv_row * T * D
+        scale_base = kv_row * T
+        k_raw = tl.load(
+            KQ + kv_base + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0
+        ).to(tl.float32)
+        k_scales = tl.load(KS + scale_base + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
+        k_zp = tl.load(KZ + scale_base + offs_t, mask=offs_t < T, other=0).to(tl.float32)
         scores = tl.sum(q_vals[None, :] * (k_raw - k_zp[:, None]) * k_scales[:, None], axis=1) * SM
         scores = tl.where(offs_t < T, scores, -3.4028234663852886e38)
         scores = scores - tl.max(scores, axis=0)
         probs = tl.exp(scores)
         denom = tl.sum(probs, axis=0)
-        v_raw = tl.load(VQ + row_td + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0).to(tl.float32)
-        v_scales = tl.load(VS + row_t + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
-        v_zp = tl.load(VZ + row_t + offs_t, mask=offs_t < T, other=0).to(tl.float32)
+        v_raw = tl.load(
+            VQ + kv_base + offs_t[:, None] * D + offs_d[None, :], mask=(offs_t[:, None] < T) & (offs_d[None, :] < D), other=0
+        ).to(tl.float32)
+        v_scales = tl.load(VS + scale_base + offs_t, mask=offs_t < T, other=0.0).to(tl.float32)
+        v_zp = tl.load(VZ + scale_base + offs_t, mask=offs_t < T, other=0).to(tl.float32)
         acc = tl.sum((probs / denom)[:, None] * (v_raw - v_zp[:, None]) * v_scales[:, None], axis=0)
-        tl.store(O + row * D + offs_d, acc, mask=offs_d < D)
+        tl.store(OUT + row * D + offs_d, acc, mask=offs_d < D)
 
-    _kernel[(batch * heads,)](q_c, k_c, ks_c, kz_c, v_c, vs_c, vz_c, out, tokens, dim, sm_scale, BT=block_t, BD=block_d)
+    _kernel[(batch * q_heads,)](
+        q_c, k_c, ks_c, kz_c, v_c, vs_c, vz_c, out, q_heads, kv_heads, tokens, dim, group, sm_scale, BT=block_t, BD=block_d
+    )
     return out.view_as(q)
+
+
+def triton_fused_int8_paged_kv_attention(
+    q,
+    k_pages,
+    k_scales,
+    v_pages,
+    v_scales,
+    page_table,
+    *,
+    length: int | None = None,
+    lengths=None,
+    page_size: int,
+    scale=None,
+    block_tokens: int = 4096,
+):
+    """Single-token decode attention over int8 paged K/V storage.
+
+    v3 accepts a batch-specific page table shaped [batch, logical_page], per-batch
+    variable lengths, and falls back to a block-wise streaming softmax for long
+    contexts instead of materializing full dequantized K/V.
+    """
+
+    torch = require_torch()
+    q_c, kp, ks, vp, vs, pt, lens = _prepare_paged_inputs(
+        q, k_pages, k_scales, v_pages, v_scales, page_table, length=length, lengths=lengths
+    )
+    batch, q_heads, _, dim = q_c.shape
+    kv_heads = kp.shape[1]
+    if kv_heads <= 0 or q_heads % kv_heads != 0:
+        raise ValueError("q heads must be divisible by kv heads for paged GQA/MQA")
+    max_len = int(lens.max().item()) if lens.numel() else 0
+    if max_len <= 0:
+        return torch.empty_like(q_c).zero_()
+    if max_len > block_tokens or not (_can_use_triton(q_c) and getattr(kp, "is_cuda", False) and getattr(pt, "is_cuda", False)):
+        return _paged_int8_attention_streaming(q_c, kp, ks, vp, vs, pt, lens, page_size=page_size, scale=scale, block_tokens=block_tokens)
+
+    import triton
+    import triton.language as tl
+
+    num_pages = kp.shape[2]
+    logical_pages = pt.shape[1]
+    block_d = triton.next_power_of_2(dim)
+    block_t = triton.next_power_of_2(max_len)
+    if block_d > 256:
+        raise ValueError("paged fused attention supports head_dim<=256")
+    out = torch.empty_like(q_c)
+    sm_scale = float(scale) if scale is not None else dim**-0.5
+    group = q_heads // kv_heads
+
+    @triton.jit
+    def _kernel(
+        Q,
+        KP,
+        KS,
+        VP,
+        VS,
+        PT,
+        LENS,
+        OUT,
+        QH: tl.constexpr,
+        KVH: tl.constexpr,
+        NP: tl.constexpr,
+        LP: tl.constexpr,
+        PS: tl.constexpr,
+        D: tl.constexpr,
+        GROUP: tl.constexpr,
+        SM: tl.constexpr,
+        BT: tl.constexpr,
+        BD: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        b = row // QH
+        qh = row - b * QH
+        kvh = qh // GROUP
+        length_b = tl.load(LENS + b)
+        offs_t = tl.arange(0, BT)
+        offs_d = tl.arange(0, BD)
+        logical_page = offs_t // PS
+        page_offset = offs_t - logical_page * PS
+        valid_t = offs_t < length_b
+        physical_page = tl.load(PT + b * LP + logical_page, mask=valid_t & (logical_page < LP), other=0)
+        q_vals = tl.load(Q + row * D + offs_d, mask=offs_d < D, other=0.0).to(tl.float32)
+        page_base = (((b * KVH + kvh) * NP + physical_page) * PS + page_offset) * D
+        scale_base = ((b * KVH + kvh) * NP + physical_page) * PS + page_offset
+        k_vals = tl.load(KP + page_base[:, None] + offs_d[None, :], mask=valid_t[:, None] & (offs_d[None, :] < D), other=0).to(tl.float32)
+        k_scale = tl.load(KS + scale_base, mask=valid_t, other=0.0).to(tl.float32)
+        scores = tl.sum(q_vals[None, :] * k_vals * k_scale[:, None], axis=1) * SM
+        scores = tl.where(valid_t, scores, -3.4028234663852886e38)
+        scores = scores - tl.max(scores, axis=0)
+        probs = tl.exp(scores)
+        denom = tl.sum(probs, axis=0)
+        v_vals = tl.load(VP + page_base[:, None] + offs_d[None, :], mask=valid_t[:, None] & (offs_d[None, :] < D), other=0).to(tl.float32)
+        v_scale = tl.load(VS + scale_base, mask=valid_t, other=0.0).to(tl.float32)
+        acc = tl.sum((probs / denom)[:, None] * v_vals * v_scale[:, None], axis=0)
+        tl.store(OUT + row * D + offs_d, acc, mask=offs_d < D)
+
+    _kernel[(batch * q_heads,)](
+        q_c,
+        kp,
+        ks,
+        vp,
+        vs,
+        pt,
+        lens,
+        out,
+        q_heads,
+        kv_heads,
+        num_pages,
+        logical_pages,
+        page_size,
+        dim,
+        group,
+        sm_scale,
+        BT=block_t,
+        BD=block_d,
+    )
+    return out.view_as(q)
+
+
+def triton_fused_uint8_paged_kv_attention(
+    q,
+    k_pages,
+    k_scales,
+    k_zero_points,
+    v_pages,
+    v_scales,
+    v_zero_points,
+    page_table,
+    *,
+    length: int | None = None,
+    lengths=None,
+    page_size: int,
+    scale=None,
+    block_tokens: int = 4096,
+):
+    """Single-token decode attention over asymmetric uint8 paged K/V storage."""
+
+    torch = require_torch()
+    q_c, kp, ks, vp, vs, pt, lens = _prepare_paged_inputs(
+        q, k_pages, k_scales, v_pages, v_scales, page_table, length=length, lengths=lengths
+    )
+    kz = k_zero_points.contiguous()
+    vz = v_zero_points.contiguous()
+    batch, q_heads, _, dim = q_c.shape
+    kv_heads = kp.shape[1]
+    if kv_heads <= 0 or q_heads % kv_heads != 0:
+        raise ValueError("q heads must be divisible by kv heads for paged GQA/MQA")
+    max_len = int(lens.max().item()) if lens.numel() else 0
+    if max_len <= 0:
+        return torch.empty_like(q_c).zero_()
+    if max_len > block_tokens or not (_can_use_triton(q_c) and getattr(kp, "is_cuda", False) and getattr(pt, "is_cuda", False)):
+        return _paged_uint8_attention_streaming(
+            q_c, kp, ks, kz, vp, vs, vz, pt, lens, page_size=page_size, scale=scale, block_tokens=block_tokens
+        )
+
+    import triton
+    import triton.language as tl
+
+    num_pages = kp.shape[2]
+    logical_pages = pt.shape[1]
+    block_d = triton.next_power_of_2(dim)
+    block_t = triton.next_power_of_2(max_len)
+    if block_d > 256:
+        raise ValueError("paged fused attention supports head_dim<=256")
+    out = torch.empty_like(q_c)
+    sm_scale = float(scale) if scale is not None else dim**-0.5
+    group = q_heads // kv_heads
+
+    @triton.jit
+    def _kernel(
+        Q,
+        KP,
+        KS,
+        KZ,
+        VP,
+        VS,
+        VZ,
+        PT,
+        LENS,
+        OUT,
+        QH: tl.constexpr,
+        KVH: tl.constexpr,
+        NP: tl.constexpr,
+        LP: tl.constexpr,
+        PS: tl.constexpr,
+        D: tl.constexpr,
+        GROUP: tl.constexpr,
+        SM: tl.constexpr,
+        BT: tl.constexpr,
+        BD: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        b = row // QH
+        qh = row - b * QH
+        kvh = qh // GROUP
+        length_b = tl.load(LENS + b)
+        offs_t = tl.arange(0, BT)
+        offs_d = tl.arange(0, BD)
+        logical_page = offs_t // PS
+        page_offset = offs_t - logical_page * PS
+        valid_t = offs_t < length_b
+        physical_page = tl.load(PT + b * LP + logical_page, mask=valid_t & (logical_page < LP), other=0)
+        q_vals = tl.load(Q + row * D + offs_d, mask=offs_d < D, other=0.0).to(tl.float32)
+        page_base = (((b * KVH + kvh) * NP + physical_page) * PS + page_offset) * D
+        scale_base = ((b * KVH + kvh) * NP + physical_page) * PS + page_offset
+        k_raw = tl.load(KP + page_base[:, None] + offs_d[None, :], mask=valid_t[:, None] & (offs_d[None, :] < D), other=0).to(tl.float32)
+        k_scale = tl.load(KS + scale_base, mask=valid_t, other=0.0).to(tl.float32)
+        k_zp = tl.load(KZ + scale_base, mask=valid_t, other=0).to(tl.float32)
+        scores = tl.sum(q_vals[None, :] * (k_raw - k_zp[:, None]) * k_scale[:, None], axis=1) * SM
+        scores = tl.where(valid_t, scores, -3.4028234663852886e38)
+        scores = scores - tl.max(scores, axis=0)
+        probs = tl.exp(scores)
+        denom = tl.sum(probs, axis=0)
+        v_raw = tl.load(VP + page_base[:, None] + offs_d[None, :], mask=valid_t[:, None] & (offs_d[None, :] < D), other=0).to(tl.float32)
+        v_scale = tl.load(VS + scale_base, mask=valid_t, other=0.0).to(tl.float32)
+        v_zp = tl.load(VZ + scale_base, mask=valid_t, other=0).to(tl.float32)
+        acc = tl.sum((probs / denom)[:, None] * (v_raw - v_zp[:, None]) * v_scale[:, None], axis=0)
+        tl.store(OUT + row * D + offs_d, acc, mask=offs_d < D)
+
+    _kernel[(batch * q_heads,)](
+        q_c,
+        kp,
+        ks,
+        kz,
+        vp,
+        vs,
+        vz,
+        pt,
+        lens,
+        out,
+        q_heads,
+        kv_heads,
+        num_pages,
+        logical_pages,
+        page_size,
+        dim,
+        group,
+        sm_scale,
+        BT=block_t,
+        BD=block_d,
+    )
+    return out.view_as(q)
+
+
+def _prepare_paged_inputs(q, k_pages, k_scales, v_pages, v_scales, page_table, *, length: int | None, lengths):
+    torch = require_torch()
+    q_c = q.contiguous()
+    kp = k_pages.contiguous()
+    vp = v_pages.contiguous()
+    ks = k_scales.contiguous()
+    vs = v_scales.contiguous()
+    if q_c.dim() != 4 or q_c.shape[-2] != 1:
+        raise ValueError("paged fused attention expects q shaped [batch, q_heads, 1, head_dim]")
+    batch = q_c.shape[0]
+    pt = page_table.to(device=q_c.device, dtype=torch.long).contiguous()
+    if pt.dim() == 1:
+        pt = pt.unsqueeze(0).expand(batch, -1).contiguous()
+    if pt.dim() != 2 or pt.shape[0] != batch:
+        raise ValueError("page_table must be shaped [logical_page] or [batch, logical_page]")
+    if lengths is None:
+        if length is None:
+            length = int(pt.shape[1] * kp.shape[3])
+        lens = torch.full((batch,), int(length), device=q_c.device, dtype=torch.int32)
+    else:
+        lens = lengths.to(device=q_c.device, dtype=torch.int32).contiguous()
+        if lens.dim() != 1 or lens.shape[0] != batch:
+            raise ValueError("lengths must be shaped [batch]")
+    return q_c, kp, ks, vp, vs, pt, lens
+
+
+def _paged_int8_attention_streaming(
+    q, k_pages, k_scales, v_pages, v_scales, page_table, lengths, *, page_size: int, scale=None, block_tokens: int = 4096
+):
+    torch = require_torch()
+    batch, q_heads, _, dim = q.shape
+    kv_heads = k_pages.shape[1]
+    group = q_heads // kv_heads
+    sm_scale = float(scale) if scale is not None else dim**-0.5
+    out = torch.empty_like(q)
+    for b in range(batch):
+        length = int(lengths[b].item())
+        if length <= 0:
+            out[b].zero_()
+            continue
+        for qh in range(q_heads):
+            kvh = qh // group
+            q_vec = q[b, qh, 0].float()
+            m = q_vec.new_full((), -float("inf"))
+            denom = q_vec.new_zeros(())
+            acc = torch.zeros(dim, device=q.device, dtype=torch.float32)
+            for start in range(0, length, block_tokens):
+                end = min(start + block_tokens, length)
+                k_block, v_block = _gather_int8_paged_block(
+                    k_pages, k_scales, v_pages, v_scales, page_table[b], b, kvh, start, end, page_size, dtype=q.dtype
+                )
+                scores = torch.matmul(k_block.float(), q_vec) * sm_scale
+                block_m = scores.max()
+                new_m = torch.maximum(m, block_m)
+                alpha = torch.exp(m - new_m) if torch.isfinite(m) else q_vec.new_zeros(())
+                probs = torch.exp(scores - new_m)
+                acc = acc * alpha + torch.matmul(probs, v_block.float())
+                denom = denom * alpha + probs.sum()
+                m = new_m
+            out[b, qh, 0] = (acc / denom.clamp_min(1e-20)).to(dtype=q.dtype)
+    return out
+
+
+def _paged_uint8_attention_streaming(
+    q,
+    k_pages,
+    k_scales,
+    k_zero_points,
+    v_pages,
+    v_scales,
+    v_zero_points,
+    page_table,
+    lengths,
+    *,
+    page_size: int,
+    scale=None,
+    block_tokens: int = 4096,
+):
+    torch = require_torch()
+    batch, q_heads, _, dim = q.shape
+    kv_heads = k_pages.shape[1]
+    group = q_heads // kv_heads
+    sm_scale = float(scale) if scale is not None else dim**-0.5
+    out = torch.empty_like(q)
+    for b in range(batch):
+        length = int(lengths[b].item())
+        if length <= 0:
+            out[b].zero_()
+            continue
+        for qh in range(q_heads):
+            kvh = qh // group
+            q_vec = q[b, qh, 0].float()
+            m = q_vec.new_full((), -float("inf"))
+            denom = q_vec.new_zeros(())
+            acc = torch.zeros(dim, device=q.device, dtype=torch.float32)
+            for start in range(0, length, block_tokens):
+                end = min(start + block_tokens, length)
+                k_block, v_block = _gather_uint8_paged_block(
+                    k_pages,
+                    k_scales,
+                    k_zero_points,
+                    v_pages,
+                    v_scales,
+                    v_zero_points,
+                    page_table[b],
+                    b,
+                    kvh,
+                    start,
+                    end,
+                    page_size,
+                    dtype=q.dtype,
+                )
+                scores = torch.matmul(k_block.float(), q_vec) * sm_scale
+                block_m = scores.max()
+                new_m = torch.maximum(m, block_m)
+                alpha = torch.exp(m - new_m) if torch.isfinite(m) else q_vec.new_zeros(())
+                probs = torch.exp(scores - new_m)
+                acc = acc * alpha + torch.matmul(probs, v_block.float())
+                denom = denom * alpha + probs.sum()
+                m = new_m
+            out[b, qh, 0] = (acc / denom.clamp_min(1e-20)).to(dtype=q.dtype)
+    return out
+
+
+def _gather_int8_paged_block(
+    k_pages, k_scales, v_pages, v_scales, page_table, batch_idx: int, kv_head: int, start: int, end: int, page_size: int, *, dtype
+):
+    torch = require_torch()
+    pieces_k = []
+    pieces_v = []
+    for token in range(start, end):
+        logical_page = token // page_size
+        physical_page = int(page_table[logical_page].item())
+        offset = token % page_size
+        k = k_pages[batch_idx, kv_head, physical_page, offset].float() * k_scales[batch_idx, kv_head, physical_page, offset].float()
+        v = v_pages[batch_idx, kv_head, physical_page, offset].float() * v_scales[batch_idx, kv_head, physical_page, offset].float()
+        pieces_k.append(k)
+        pieces_v.append(v)
+    return k_pages.new_empty((0, k_pages.shape[-1]), dtype=dtype) if not pieces_k else torch.stack(pieces_k).to(
+        dtype=dtype
+    ), v_pages.new_empty((0, v_pages.shape[-1]), dtype=dtype) if not pieces_v else torch.stack(pieces_v).to(dtype=dtype)
+
+
+def _gather_uint8_paged_block(
+    k_pages,
+    k_scales,
+    k_zero_points,
+    v_pages,
+    v_scales,
+    v_zero_points,
+    page_table,
+    batch_idx: int,
+    kv_head: int,
+    start: int,
+    end: int,
+    page_size: int,
+    *,
+    dtype,
+):
+    torch = require_torch()
+    pieces_k = []
+    pieces_v = []
+    for token in range(start, end):
+        logical_page = token // page_size
+        physical_page = int(page_table[logical_page].item())
+        offset = token % page_size
+        k = (
+            k_pages[batch_idx, kv_head, physical_page, offset].float() - k_zero_points[batch_idx, kv_head, physical_page, offset].float()
+        ) * k_scales[batch_idx, kv_head, physical_page, offset].float()
+        v = (
+            v_pages[batch_idx, kv_head, physical_page, offset].float() - v_zero_points[batch_idx, kv_head, physical_page, offset].float()
+        ) * v_scales[batch_idx, kv_head, physical_page, offset].float()
+        pieces_k.append(k)
+        pieces_v.append(v)
+    return k_pages.new_empty((0, k_pages.shape[-1]), dtype=dtype) if not pieces_k else torch.stack(pieces_k).to(
+        dtype=dtype
+    ), v_pages.new_empty((0, v_pages.shape[-1]), dtype=dtype) if not pieces_v else torch.stack(pieces_v).to(dtype=dtype)
+
+
+def _can_repeat_kv_for_gqa(q, k) -> bool:
+    return bool(
+        getattr(q, "dim", lambda: 0)() == 4
+        and getattr(k, "dim", lambda: 0)() == 4
+        and q.shape[1] != k.shape[1]
+        and k.shape[1] > 0
+        and q.shape[1] % k.shape[1] == 0
+    )
 
 
 def _supports_fused_decode(q, k_q, v_q, k_scale, v_scale) -> bool:
@@ -424,12 +926,16 @@ def _supports_fused_decode(q, k_q, v_q, k_scale, v_scale) -> bool:
         and v_q.dim() == 4
         and q.shape[-2] == 1
         and q.shape[0] == k_q.shape[0] == v_q.shape[0]
-        and q.shape[1] == k_q.shape[1] == v_q.shape[1]
+        and k_q.shape[1] > 0
+        and q.shape[1] % k_q.shape[1] == 0
+        and k_q.shape[1] == v_q.shape[1]
         and q.shape[-1] == k_q.shape[-1] == v_q.shape[-1]
         and k_q.shape[-2] == v_q.shape[-2]
         and tuple(k_scale.shape) == (*k_q.shape[:-1], 1)
         and tuple(v_scale.shape) == (*v_q.shape[:-1], 1)
     )
+
+
 def _prepare_rope_cache(cos, sin, target):
     if cos.shape[-1] * 2 == target.shape[-1]:
         cos = cos.repeat_interleave(2, dim=-1)
