@@ -1,5 +1,7 @@
 # llm-memlab
 
+Current release target: `v0.1.0`.
+
 `llm-memlab` is a memory-first LLM architecture prototype:
 
 - A small graph IR that tracks tensor shape, dtype, role, and lifetime.
@@ -10,6 +12,19 @@
 This is intentionally not a PyTorch replacement yet. It is the first useful layer:
 keep PyTorch compatibility, make memory visible, then move hot paths into custom
 backends or Triton kernels later.
+
+## Release Status
+
+Stable in `0.1.0`:
+
+- Memory estimation, tensor lifetime planning, PyTorch/HF inspection, debugger reports, benchmark storage, quality gates, and conservative HF fallback workflows.
+- `llm_memlab.production` as the stable public API surface for the current 0.x line.
+- Backend detection and policy explanations for Torch, CUDA, Triton, CuTile contract, optional plugins, and `vllm-serving`.
+
+Experimental in `0.1.0`:
+
+- Triton fused/paged decode kernels, quantized direct cache paths, CuTile runtime execution, and direct vLLM serving execution.
+- Experimental paths require local certification on the target model, GPU, dtype, sequence length, and backend before production promotion.
 
 ## How To Use In 5 Minutes
 
@@ -39,6 +54,8 @@ python -m llm_memlab kernel-demo --device cuda --repeats 3
 - [Use In 5 Minutes](docs/quickstart_5_minutes.md)
 - [Production Integration Guide](docs/production_integration_guide.md)
 - [Production Checklist](docs/production_checklist.md)
+- [Release Checklist](docs/release_checklist.md)
+- [Cloud Notebook Examples](docs/cloud_notebooks.md)
 - [How To Integrate In CI](docs/ci_integration.md)
 - [HF Adapter Limitations](docs/hf_adapter_limitations.md)
 - [Kernel Policy Decision Table](docs/kernel_policy_decision_table.md)

@@ -24,3 +24,12 @@ kernel_cert_smoke.csv
 *_smoke.html
 history_base_*.json
 history_candidate.json
+serving_bench.json
+serving_bench.csv
+serving_bench.html
+serving_dashboard.html
+serving_history_dashboard.html
+local_model_fixtures.json
+local_models_report.json
+local_cert_matrix.json
+profiles_local.json
