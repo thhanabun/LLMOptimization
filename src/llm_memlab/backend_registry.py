@@ -82,6 +82,7 @@ def default_backend_registry() -> BackendRegistry:
     registry.register("triton", _check_triton, priority=30)
     registry.register("cuda", _check_cuda, priority=20)
     registry.register("cutile", _check_cutile, priority=25)
+    registry.register_plugin(_vllm_serving_plugin())
     registry.register("flash-attn", lambda: _check_import("flash_attn", "flash-attn"), priority=28, kind="optional")
     registry.register("xformers", lambda: _check_import("xformers", "xformers"), priority=24, kind="optional")
     registry.register("vllm", lambda: _check_import("vllm", "vllm"), priority=22, kind="optional")
@@ -147,6 +148,21 @@ def _check_cutile() -> tuple[bool, str]:
         return info.available, "; ".join(info.reasons)
     except Exception as exc:
         return False, str(exc)
+
+
+def _vllm_serving_plugin() -> BackendPlugin:
+    try:
+        from .backends.vllm import vllm_backend_plugin
+
+        return vllm_backend_plugin()
+    except Exception as exc:
+        reason = f"vLLM serving detector failed: {exc}"
+        return BackendPlugin(
+            name="vllm-serving",
+            check=lambda: (False, reason),
+            priority=34,
+            kind="serving",
+        )
 
 
 def _check_import(module: str, label: str) -> tuple[bool, str]:
