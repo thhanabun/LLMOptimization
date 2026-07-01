@@ -28,14 +28,25 @@ from .benchmark_store import (
     write_benchmark_csv,
     write_benchmark_json,
 )
+from .benchmark_dashboard import BenchmarkDashboard, benchmark_dashboard_from_files, write_benchmark_dashboard_html
 from .benchmark_suite import InferenceSuiteResult, benchmark_inference_suite, compare_inference_suites
 from .bytes import dtype_size_bytes, format_bytes, parse_bytes
 from .compare_report import CompareReport, compare_report_to_html, scoreboard_to_html, write_compare_html, write_scoreboard_html
 from .backends.cutile import CuTileDispatchResult, CuTileRuntimeInfo, certify_cutile_decode_attention, detect_cutile_runtime
+from .backends.vllm import VLLMGenerateResult, VLLMRuntimeInfo, detect_vllm_runtime, run_vllm_generate, vllm_backend_plugin
 from .decode_benchmarks import DecodeBackendMatrix, FusedDecodeBenchmark, benchmark_decode_backend_matrix, benchmark_fused_decode_attention
 from .deep_debugger import DeepDebugReport, build_deep_debug_report, write_deep_debug_html
 from .debugger_v2 import DEBUGGER_V2_SCHEMA_VERSION, DebuggerV2Report, debugger_v2_to_html, write_debugger_v2_html
 from .env_certification import ENV_CERTIFICATION_SCHEMA_VERSION, EnvironmentCertificationReport, certify_environment
+from .certification_matrix import (
+    CERTIFICATION_MATRIX_SCHEMA_VERSION,
+    CertificationMatrixGateResult,
+    CertificationMatrixReport,
+    ModelCertificationOutcome,
+    ModelCertificationTarget,
+    certify_model_matrix,
+    default_model_certification_targets,
+)
 from .drift_debugger import DriftReport, LayerDriftRecord, compare_layer_drift
 from .estimates import MemoryEstimate, TransformerConfig, estimate_transformer_memory, preset_config
 from .hardware import HARDWARE_PROFILE_SCHEMA_VERSION, HardwareProfile, detect_hardware_profile
@@ -47,6 +58,7 @@ from .hf_adapter import (
     GemmaMemoryAdapter,
     GPTNeoXMemoryAdapter,
     HFAdapterInfo,
+    HFGenerateIntegrationPlan,
     LlamaMemoryAdapter,
     MemoryFirstGenerateResult,
     MemoryFirstHFAdapter,
@@ -117,6 +129,15 @@ from .kernel_certification import (
     default_kernel_certification_cases,
 )
 from .kernel_policy import KernelPolicy, KernelSelection, default_kernel_policy, select_kernel_policy
+from .kernel_promotion import KERNEL_PROMOTION_SCHEMA_VERSION, KernelPromotionDecision, KernelPromotionRequirements, decide_kernel_promotion
+from .local_model_harness import (
+    DEFAULT_LOCAL_MODEL_FIXTURES,
+    LOCAL_MODEL_FIXTURE_SCHEMA_VERSION,
+    LocalModelFixture,
+    LocalModelHarnessReport,
+    LocalModelMatch,
+    scan_local_model_fixtures,
+)
 from .kernels import (
     KernelConfig,
     QuantizedAttentionDispatch,
@@ -179,6 +200,7 @@ from .quality_suite import (
     assert_quality_regression,
     run_quality_regression,
 )
+from .serving_benchmark import SERVING_BENCHMARK_SCHEMA_VERSION, ServingBenchmarkResult, ServingRun, benchmark_serving_paths
 from .memory_profiler import (
     MEMORY_PROFILE_SCHEMA_VERSION,
     CUDAMemorySample,
@@ -200,7 +222,9 @@ __all__ = [
     "BackendPlugin",
     "BackendRegistry",
     "BenchmarkConfig",
+    "BenchmarkDashboard",
     "CERTIFICATION_SCHEMA_VERSION",
+    "CERTIFICATION_MATRIX_SCHEMA_VERSION",
     "write_memory_profile_json",
     "select_memory_adapter",
     "benchmark_gate",
@@ -211,6 +235,7 @@ __all__ = [
     "QUALITY_SCHEMA_VERSION",
     "QwenMemoryAdapter",
     "Qwen3MemoryAdapter",
+    "SERVING_BENCHMARK_SCHEMA_VERSION",
     "MistralMemoryAdapter",
     "MixtralMemoryAdapter",
     "LlamaMemoryAdapter",
@@ -225,6 +250,8 @@ __all__ = [
     "BenchmarkResult",
     "BufferPlan",
     "CacheProfileRegistry",
+    "CertificationMatrixGateResult",
+    "CertificationMatrixReport",
     "CompareReport",
     "QualityRegressionResult",
     "MemoryProfileComparison",
@@ -239,6 +266,8 @@ __all__ = [
     "CUDAMemorySample",
     "CuTileDispatchResult",
     "CuTileRuntimeInfo",
+    "VLLMGenerateResult",
+    "VLLMRuntimeInfo",
     "DeepSeekMemoryAdapter",
     "DecodeConfig",
     "DecodeBackendMatrix",
@@ -265,12 +294,17 @@ __all__ = [
     "HFCachePolicy",
     "HFCachePolicyDecision",
     "HFGenerateRun",
+    "HFGenerateIntegrationPlan",
     "HFMemoryFirstBenchmark",
     "HardwareProfile",
     "KernelCertificationCase",
     "KernelCertificationReport",
     "KernelCertificationResult",
+    "KERNEL_PROMOTION_SCHEMA_VERSION",
     "KernelPolicy",
+    "KernelPromotionDecision",
+    "KernelPromotionRequirements",
+    "LOCAL_MODEL_FIXTURE_SCHEMA_VERSION",
     "InferenceSuiteResult",
     "KVCacheConfig",
     "KVQualityResult",
@@ -284,6 +318,11 @@ __all__ = [
     "MemoryPlanner",
     "MemoryPolicy",
     "ModelArchitectureInfo",
+    "ModelCertificationOutcome",
+    "ModelCertificationTarget",
+    "LocalModelFixture",
+    "LocalModelHarnessReport",
+    "LocalModelMatch",
     "OOMRunResult",
     "OOMStrategy",
     "OperationSpec",
@@ -303,6 +342,8 @@ __all__ = [
     "TokenQualityResult",
     "TorchTrace",
     "TransformerConfig",
+    "ServingBenchmarkResult",
+    "ServingRun",
     "analyze_qk_attention",
     "apply_rope",
     "attention_stats_to_text",
@@ -313,9 +354,12 @@ __all__ = [
     "benchmark_decode_backend_matrix",
     "benchmark_inference_suite",
     "benchmark_memory_first_hf_generate",
+    "benchmark_serving_paths",
+    "benchmark_dashboard_from_files",
     "certify_hf_cache",
     "certify_hf_cache_model",
     "certify_environment",
+    "certify_model_matrix",
     "certify_cutile_decode_attention",
     "certify_quantized_attention",
     "choose_memory_policy",
@@ -339,6 +383,8 @@ __all__ = [
     "default_generation_strategies",
     "default_kernel_certification_cases",
     "default_kernel_policy",
+    "default_model_certification_targets",
+    "DEFAULT_LOCAL_MODEL_FIXTURES",
     "dequantize_int8_per_token",
     "dequantize_uint8_per_token",
     "dtype_size_bytes",
@@ -379,6 +425,7 @@ __all__ = [
     "rms_norm_manual_backward",
     "run_with_oom_fallback",
     "sample_next_token",
+    "scan_local_model_fixtures",
     "scaled_dot_product_attention",
     "scoreboard_to_html",
     "select_quantized_cache_profile",
@@ -407,6 +454,8 @@ __all__ = [
     "detect_hf_adapter_info",
     "detect_cutile_runtime",
     "detect_hardware_profile",
+    "detect_vllm_runtime",
+    "decide_kernel_promotion",
     "install_memory_first_generate",
     "adapter_satisfies_contract",
     "list_memory_adapters",
@@ -415,6 +464,7 @@ __all__ = [
     "memory_first_generate_hf",
     "profile_decode_memory",
     "run_quality_regression",
+    "run_vllm_generate",
     "select_kernel_policy",
     "select_hf_cache_policy",
     "supports_transformers_cache_api",
@@ -425,9 +475,11 @@ __all__ = [
     "hf_adapter_matrix_to_text",
     "write_debugger_v2_html",
     "write_compare_html",
+    "write_benchmark_dashboard_html",
     "write_interactive_html",
     "write_scoreboard_html",
     "write_timeline_html",
     "write_trace_html",
+    "vllm_backend_plugin",
     "__version__",
 ]

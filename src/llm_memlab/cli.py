@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
 from .estimates import TransformerConfig, estimate_transformer_memory, preset_config
 from .ir import GraphSpec, OperationSpec, TensorSpec
 from .planner import MemoryPlanner
+
+
+def _default_local_model_root() -> str:
+    configured = os.environ.get("LLM_MEMLAB_MODEL_ROOT")
+    if configured:
+        return configured
+    if os.name == "nt":
+        return r"D:\hf_models"
+    return "./models"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,6 +207,26 @@ def main(argv: list[str] | None = None) -> int:
     memory_first_hf_parser.add_argument("--fail-on-regression", action="store_true")
     memory_first_hf_parser.set_defaults(func=_memory_first_hf_bench)
 
+    serving_parser = subparsers.add_parser(
+        "serving-bench", help="Compare HF generate, llm-memlab memory-first HF, and optional vLLM serving."
+    )
+    serving_parser.add_argument("--model", required=True, help="Model name or local path.")
+    serving_parser.add_argument("--prompt", default="Hello", help="Prompt text.")
+    serving_parser.add_argument("--tokens", type=int, default=8)
+    serving_parser.add_argument("--adapter-tokens", type=int, help="Override memory-first adapter token count.")
+    serving_parser.add_argument("--device", default="auto")
+    serving_parser.add_argument("--dtype", default="auto", help="auto, fp16, bf16, or fp32")
+    serving_parser.add_argument("--cache", choices=["quantized", "paged"], default="paged")
+    serving_parser.add_argument("--quant-dtype", default="int8")
+    serving_parser.add_argument("--no-vllm", action="store_true", help="Skip the vLLM serving path.")
+    serving_parser.add_argument("--allow-experimental-direct-cache", action="store_true")
+    serving_parser.add_argument("--local-files-only", action="store_true")
+    serving_parser.add_argument("--json-out")
+    serving_parser.add_argument("--csv-out")
+    serving_parser.add_argument("--html-out")
+    serving_parser.add_argument("--fail-on-regression", action="store_true")
+    serving_parser.set_defaults(func=_serving_bench)
+
     hf_cache_cert_parser = subparsers.add_parser(
         "hf-cache-certify", help="Certify direct HF Cache adapter correctness with generated-token and prefill-logit gates."
     )
@@ -237,6 +267,59 @@ def main(argv: list[str] | None = None) -> int:
     certify_env_parser.add_argument("--fail-on-regression", action="store_true")
     certify_env_parser.set_defaults(func=_certify_env)
 
+    matrix_parser = subparsers.add_parser("certify-model-matrix", help="Certify a real-model HF cache matrix and emit profiles.json.")
+    matrix_parser.add_argument("--models", nargs="*", help="Entries like family=path_or_model. Defaults to known small model families.")
+    matrix_parser.add_argument("--local-root", help="Optional directory containing locally cached model folders.")
+    matrix_parser.add_argument("--allow-remote", action="store_true", help="Allow Transformers to fetch remote models.")
+    matrix_parser.add_argument("--prompt", action="append", help="Prompt to certify. Can be repeated.")
+    matrix_parser.add_argument("--device", default="auto")
+    matrix_parser.add_argument("--dtype", default="auto")
+    matrix_parser.add_argument("--json-out")
+    matrix_parser.add_argument("--profiles-out", default="profiles.json")
+    matrix_parser.add_argument("--require-real-models", action="store_true", help="Fail if local production targets are skipped.")
+    matrix_parser.add_argument("--min-certified-models", type=int, default=0, help="Minimum real model certifications required to pass.")
+    matrix_parser.add_argument("--strict", action="store_true", help="Require every production target to be certified by a real model.")
+    matrix_parser.add_argument("--fail-on-regression", action="store_true")
+    matrix_parser.set_defaults(func=_certify_model_matrix)
+
+    local_harness_parser = subparsers.add_parser(
+        "local-model-harness", help="Scan local model fixtures and optionally certify available cached models."
+    )
+    local_harness_parser.add_argument(
+        "--root",
+        default=_default_local_model_root(),
+        help="Directory containing local cached model folders. Defaults to LLM_MEMLAB_MODEL_ROOT or a platform-local model root.",
+    )
+    local_harness_parser.add_argument("--json-out", default="local_model_fixtures.json")
+    local_harness_parser.add_argument("--certify", action="store_true", help="Run certify-model-matrix against available fixtures.")
+    local_harness_parser.add_argument("--matrix-out", default="local_model_matrix.json")
+    local_harness_parser.add_argument("--profiles-out", default="profiles.json")
+    local_harness_parser.add_argument("--prompt", action="append")
+    local_harness_parser.add_argument("--device", default="auto")
+    local_harness_parser.add_argument("--dtype", default="auto")
+    local_harness_parser.add_argument("--require-real-models", action="store_true")
+    local_harness_parser.add_argument("--min-certified-models", type=int, default=0)
+    local_harness_parser.add_argument("--strict", action="store_true")
+    local_harness_parser.set_defaults(func=_local_model_harness)
+
+    profile_parser = subparsers.add_parser("profile", help="Inspect and manage quantized cache certification profiles.")
+    profile_subparsers = profile_parser.add_subparsers(dest="profile_command", required=True)
+    profile_export = profile_subparsers.add_parser("export", help="Export built-in/default profiles to JSON.")
+    profile_export.add_argument("--out", default="profiles.json")
+    profile_export.set_defaults(func=_profile_export)
+    profile_merge = profile_subparsers.add_parser("merge", help="Merge profile JSON/YAML files, with earlier files taking priority.")
+    profile_merge.add_argument("--inputs", nargs="+", required=True)
+    profile_merge.add_argument("--out", default="profiles.merged.json")
+    profile_merge.set_defaults(func=_profile_merge)
+    profile_explain = profile_subparsers.add_parser("explain", help="Explain the cache policy decision for a family/model/profile.")
+    profile_explain.add_argument("--family", required=True)
+    profile_explain.add_argument("--model")
+    profile_explain.add_argument("--quant-dtype", default="int8")
+    profile_explain.add_argument("--prompt-tokens", type=int, default=1)
+    profile_explain.add_argument("--profile", action="append", default=[])
+    profile_explain.add_argument("--allow-experimental-quantized", action="store_true")
+    profile_explain.set_defaults(func=_profile_explain)
+
     kv_quality_parser = subparsers.add_parser("kv-quality-demo", help="Measure KV quantization error on random K/V-like tensors.")
     kv_quality_parser.add_argument("--tokens", type=int, default=16)
     kv_quality_parser.add_argument("--heads", type=int, default=8)
@@ -265,6 +348,12 @@ def main(argv: list[str] | None = None) -> int:
         "--fail-on-regression", action="store_true", help="Return exit code 1 if any comparison exceeds the threshold."
     )
     benchmark_compare_parser.set_defaults(func=_benchmark_compare)
+
+    dashboard_parser = subparsers.add_parser("benchmark-dashboard", help="Build an HTML dashboard from benchmark JSON/CSV history.")
+    dashboard_parser.add_argument("--inputs", nargs="+", required=True)
+    dashboard_parser.add_argument("--out", default="benchmark_dashboard.html")
+    dashboard_parser.add_argument("--title", default="llm-memlab benchmark dashboard")
+    dashboard_parser.set_defaults(func=_benchmark_dashboard)
 
     fused_bench_parser = subparsers.add_parser("fused-decode-bench", help="Run a CUDA fused decode benchmark matrix with quality metrics.")
     fused_bench_parser.add_argument("--q-heads", default="8", help="Comma-separated Q head counts.")
@@ -326,6 +415,20 @@ def main(argv: list[str] | None = None) -> int:
     certify_parser.add_argument("--fail-on-regression", action="store_true", help="Return exit code 1 if any certified case fails.")
     certify_parser.set_defaults(func=_kernel_certify)
 
+    promote_parser = subparsers.add_parser("kernel-promote", help="Run kernel certification and explain whether a backend can be promoted.")
+    promote_parser.add_argument("--backend", choices=["triton", "cutile"], default="triton")
+    promote_parser.add_argument("--quick", action="store_true")
+    promote_parser.add_argument("--repeats", type=int, default=1)
+    promote_parser.add_argument("--warmup", type=int, default=0)
+    promote_parser.add_argument("--require-long-context", action="store_true")
+    promote_parser.add_argument(
+        "--allow-missing-long-context",
+        action="store_true",
+        help="Do not require seq >= 4096 coverage for experimental local smoke runs.",
+    )
+    promote_parser.add_argument("--fail-on-regression", action="store_true")
+    promote_parser.set_defaults(func=_kernel_promote)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
@@ -354,6 +457,120 @@ def _backend_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _certify_model_matrix(args: argparse.Namespace) -> int:
+    from .certification_matrix import ModelCertificationTarget, certify_model_matrix, default_model_certification_targets
+
+    if args.models:
+        targets = []
+        for item in args.models:
+            if "=" not in item:
+                print(f"Invalid --models entry {item!r}; expected family=path_or_model")
+                return 2
+            family, model = item.split("=", 1)
+            targets.append(ModelCertificationTarget(name=family, family=family, model=model, local_files_only=not args.allow_remote))
+    else:
+        targets = list(default_model_certification_targets(local_root=args.local_root))
+    report = certify_model_matrix(
+        targets,
+        prompts=tuple(args.prompt or ["hello", "Explain KV cache briefly."]),
+        device=args.device,
+        dtype=args.dtype,
+        allow_remote=args.allow_remote,
+    )
+    print(report.to_text())
+    if args.json_out:
+        print(f"Certification matrix JSON written to {report.write_json(args.json_out)}")
+    if args.profiles_out:
+        print(f"Profiles JSON written to {report.write_profiles(args.profiles_out)}")
+    gate = report.evaluate_gate(
+        require_real_models=args.require_real_models,
+        min_certified_models=args.min_certified_models,
+        strict=args.strict,
+    )
+    if args.require_real_models or args.min_certified_models > 0 or args.strict:
+        print("")
+        print(gate.to_text())
+    if (args.fail_on_regression and not report.passed) or not gate.passed:
+        return 1
+    return 0
+
+
+def _local_model_harness(args: argparse.Namespace) -> int:
+    from .certification_matrix import certify_model_matrix
+    from .local_model_harness import scan_local_model_fixtures
+
+    report = scan_local_model_fixtures(args.root)
+    print(report.to_text())
+    if args.json_out:
+        print(f"Local model fixture JSON written to {report.write_json(args.json_out)}")
+    if not args.certify:
+        if (args.require_real_models or args.strict or args.min_certified_models > 0) and report.available_count < max(
+            1 if args.require_real_models or args.strict else 0, args.min_certified_models
+        ):
+            print("Local model harness gate failed: not enough cached model fixtures are available.")
+            return 1
+        return 0
+
+    targets = report.targets(available_only=True)
+    if not targets and (args.require_real_models or args.strict or args.min_certified_models > 0):
+        print("Local model harness gate failed: no available local model fixtures to certify.")
+        return 1
+    matrix = certify_model_matrix(
+        targets,
+        prompts=tuple(args.prompt or ["hello", "Explain KV cache briefly."]),
+        device=args.device,
+        dtype=args.dtype,
+        allow_remote=False,
+    )
+    print("")
+    print(matrix.to_text())
+    if args.matrix_out:
+        print(f"Certification matrix JSON written to {matrix.write_json(args.matrix_out)}")
+    if args.profiles_out:
+        print(f"Profiles JSON written to {matrix.write_profiles(args.profiles_out)}")
+    gate = matrix.evaluate_gate(
+        require_real_models=args.require_real_models,
+        min_certified_models=args.min_certified_models,
+        strict=args.strict,
+    )
+    print("")
+    print(gate.to_text())
+    return 0 if gate.passed else 1
+
+
+def _profile_export(args: argparse.Namespace) -> int:
+    from .hf_cache_profiles import DEFAULT_QUANTIZED_CACHE_PROFILES, write_quantized_cache_profiles
+
+    print(f"Profiles JSON written to {write_quantized_cache_profiles(DEFAULT_QUANTIZED_CACHE_PROFILES, args.out)}")
+    return 0
+
+
+def _profile_merge(args: argparse.Namespace) -> int:
+    from .hf_cache_profiles import load_quantized_cache_profiles, write_quantized_cache_profiles
+
+    registry = load_quantized_cache_profiles(args.inputs)
+    print(f"Profiles JSON written to {write_quantized_cache_profiles(registry.profiles, args.out)}")
+    return 0
+
+
+def _profile_explain(args: argparse.Namespace) -> int:
+    from .hf_cache_policy import HFCachePolicy, select_hf_cache_policy
+
+    policy = HFCachePolicy(
+        requested_cache="quantized",
+        model=args.model,
+        quant_dtype=args.quant_dtype,
+        quantized_profile_paths=tuple(args.profile),
+        allow_experimental_quantized=args.allow_experimental_quantized,
+    )
+    decision = select_hf_cache_policy(family=args.family, prompt_tokens=args.prompt_tokens, policy=policy)
+    print(decision.to_text())
+    if decision.profile is not None:
+        print("")
+        print(decision.profile.to_text())
+    return 0
+
+
 def _benchmark_compare(args: argparse.Namespace) -> int:
     from .benchmark_store import assert_no_regressions, benchmark_history, compare_record_sets, read_benchmark_files
 
@@ -375,6 +592,14 @@ def _benchmark_compare(args: argparse.Namespace) -> int:
         except AssertionError as exc:
             print(str(exc))
             return 1
+    return 0
+
+
+def _benchmark_dashboard(args: argparse.Namespace) -> int:
+    from .benchmark_dashboard import write_benchmark_dashboard_html
+
+    path = write_benchmark_dashboard_html(args.inputs, args.out, title=args.title)
+    print(f"Benchmark dashboard HTML written to {path}")
     return 0
 
 
@@ -528,6 +753,24 @@ def _kernel_certify(args: argparse.Namespace) -> int:
     if args.csv_out:
         print(f"Certification CSV written to {report.write_csv(args.csv_out)}")
     if args.fail_on_regression and not report.passed:
+        return 1
+    return 0
+
+
+def _kernel_promote(args: argparse.Namespace) -> int:
+    from .kernel_certification import certify_quantized_attention
+    from .kernel_promotion import decide_kernel_promotion
+
+    report = certify_quantized_attention(quick=args.quick, repeats=args.repeats, warmup=args.warmup)
+    decision = decide_kernel_promotion(
+        report,
+        backend=args.backend,
+        require_long_context=args.require_long_context or not args.allow_missing_long_context,
+    )
+    print(report.to_text())
+    print("")
+    print(decision.to_text())
+    if args.fail_on_regression and not decision.promoted:
         return 1
     return 0
 
@@ -1445,6 +1688,42 @@ def _memory_first_hf_bench(args: argparse.Namespace) -> int:
         except AssertionError as exc:
             print(str(exc))
             return 1
+    return 0
+
+
+def _serving_bench(args: argparse.Namespace) -> int:
+    try:
+        from .serving_benchmark import benchmark_serving_paths
+    except RuntimeError as exc:
+        print(str(exc))
+        return 2
+
+    try:
+        result = benchmark_serving_paths(
+            args.model,
+            prompt=args.prompt,
+            max_new_tokens=args.tokens,
+            adapter_tokens=args.adapter_tokens,
+            device=args.device,
+            dtype=args.dtype,
+            local_files_only=args.local_files_only,
+            cache=args.cache,
+            quant_dtype=args.quant_dtype,
+            include_vllm=not args.no_vllm,
+            allow_experimental_direct_cache=args.allow_experimental_direct_cache,
+        )
+    except Exception as exc:
+        print(f"Could not run serving benchmark: {exc}")
+        return 2
+    print(result.to_text())
+    if args.json_out:
+        print(f"Serving benchmark JSON written to {result.write_json(args.json_out)}")
+    if args.csv_out:
+        print(f"Serving benchmark CSV written to {result.write_csv(args.csv_out)}")
+    if args.html_out:
+        print(f"Serving dashboard HTML written to {result.write_html(args.html_out)}")
+    if args.fail_on_regression and not result.passed:
+        return 1
     return 0
 
 

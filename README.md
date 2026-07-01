@@ -34,10 +34,15 @@ python -m llm_memlab kernel-demo --device cuda --repeats 3
 ### Production Docs
 
 - [Stable vs Experimental](docs/stable_vs_experimental.md)
+- [What Is Stable Today](docs/stable_today.md)
+- [Known Limitations](docs/known_limitations.md)
+- [Use In 5 Minutes](docs/quickstart_5_minutes.md)
+- [Production Integration Guide](docs/production_integration_guide.md)
 - [Production Checklist](docs/production_checklist.md)
 - [How To Integrate In CI](docs/ci_integration.md)
 - [HF Adapter Limitations](docs/hf_adapter_limitations.md)
 - [Kernel Policy Decision Table](docs/kernel_policy_decision_table.md)
+- [vLLM vs llm-memlab](docs/vllm_vs_llm_memlab.md)
 - [Deprecation And Versioning Policy](docs/versioning.md)
 
 Use `llm_memlab.production` for stable APIs and `llm_memlab.experimental` only for opt-in certified kernel paths.
@@ -51,6 +56,7 @@ For production-oriented use, keep the stable path conservative:
 - Use `select_kernel_policy()` with the default policy for stable fallback. Paged fused Triton kernels are labeled `triton-experimental` and require `KernelPolicy(allow_experimental=True)` or `backend="triton-experimental"`.
 - Use `profile_decode_memory()`/`write_memory_profile_json()` for observability artifacts; the profiler does not alter model numerics.
 - Use `select_memory_adapter()` for family-specific HF adapter selection (`LlamaMemoryAdapter`, `QwenMemoryAdapter`, `MistralMemoryAdapter`) and keep model-family integration tests local to the adapter being promoted.
+- Use `serving-bench` to compare Hugging Face generate, llm-memlab memory-first HF, and optional `vllm-serving` in one JSON/CSV/HTML dashboard.
 ### Runtime v3 Features
 
 - Paged fused decode v3 supports int8 and uint8 paged K/V, GQA/MQA, batch-specific page tables shaped `[batch, logical_page]`, variable sequence lengths shaped `[batch]`, and a streaming softmax fallback for long contexts. It is intentionally exposed as `triton-experimental` until multi-GPU coverage is broad enough.
