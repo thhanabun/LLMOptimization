@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from dataclasses import replace
 from typing import Any
@@ -96,6 +97,31 @@ class HFAdapterInfo:
                 ("Family", self.family),
                 ("Transformers Cache API", self.supports_cache_api),
                 ("Strategy", self.strategy),
+            ],
+        )
+
+
+@dataclass(frozen=True)
+class HFGenerateIntegrationPlan:
+    family: str
+    adapter: str
+    cache_position: bool
+    attention_mask: bool
+    sliding_window: bool
+    grouped_query_attention: bool
+    fallback_reason: str | None = None
+
+    def to_text(self) -> str:
+        return make_table(
+            ("Metric", "Value"),
+            [
+                ("Family", self.family),
+                ("Adapter", self.adapter),
+                ("Cache position", self.cache_position),
+                ("Attention mask", self.attention_mask),
+                ("Sliding window", self.sliding_window),
+                ("GQA/MQA", self.grouped_query_attention),
+                ("Fallback", self.fallback_reason or "n/a"),
             ],
         )
 
@@ -234,7 +260,7 @@ class BaseFamilyMemoryAdapter:
         kwargs.setdefault("use_cache", True)
         kwargs.setdefault("past_key_values", self.make_cache(input_ids, max_new_tokens=max_new_tokens))
         kwargs = self._prepare_family_kwargs(input_ids, kwargs)
-        return kwargs
+        return _filter_generate_kwargs(self.model, kwargs)
 
     def _prepare_family_kwargs(self, input_ids, kwargs: dict[str, Any]) -> dict[str, Any]:
         return kwargs
@@ -244,8 +270,20 @@ class BaseFamilyMemoryAdapter:
             "family": self.family,
             "adapter": self.__class__.__name__,
             "capabilities": self.capabilities,
+            "integration_plan": self.integration_plan(input_ids).to_text(),
             "fallback_reason": self.fallback_reason(input_ids, **kwargs),
         }
+
+    def integration_plan(self, input_ids: Any | None = None) -> HFGenerateIntegrationPlan:
+        return HFGenerateIntegrationPlan(
+            family=self.family,
+            adapter=self.__class__.__name__,
+            cache_position=self.capabilities.cache_positions and _generate_has_named_kwarg(self.model, "cache_position"),
+            attention_mask=self.capabilities.attention_mask and _generate_accepts_kwarg(self.model, "attention_mask"),
+            sliding_window=self.capabilities.sliding_window and _generate_has_named_kwarg(self.model, "sliding_window"),
+            grouped_query_attention=self.capabilities.grouped_query_attention,
+            fallback_reason=self.fallback_reason(input_ids),
+        )
 
     def fallback_reason(self, input_ids: Any | None = None, **kwargs: Any) -> str | None:
         del input_ids, kwargs
@@ -273,7 +311,7 @@ class BaseFamilyMemoryAdapter:
                     sequences, None, max_new_tokens, f"{self.family}:original-fallback", fallback_reason=str(exc)[:240]
                 )
             return memory_first_generate(self.model, input_ids, self.config, **_safe_model_kwargs(generate_kwargs))
-        except (ValueError, AttributeError) as exc:
+        except (ValueError, AttributeError, RuntimeError) as exc:
             if not _is_generate_injection_error(exc):
                 raise
             fallback_kwargs = _fallback_generate_kwargs(generate_kwargs, max_new_tokens)
@@ -626,11 +664,19 @@ def _is_generate_injection_error(exc: Exception) -> bool:
         token in message
         for token in (
             "past_key_values",
+            "past key",
             "cache_position",
             "sliding_window",
             "model_kwargs",
             "cache object",
             "cache",
+            "device",
+            "shape",
+            "size mismatch",
+            "expected all tensors",
+            "same device",
+            "indices should be",
+            "invalid for input",
         )
     )
 
@@ -639,6 +685,44 @@ def _safe_model_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value for key, value in kwargs.items() if key not in {"max_new_tokens", "past_key_values", "cache_position", "sliding_window"}
     }
+
+
+def _filter_generate_kwargs(model: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    if _generate_accepts_var_kwargs(model):
+        payload = dict(kwargs)
+        for key in ("cache_position", "sliding_window"):
+            if key in payload and not _generate_has_named_kwarg(model, key):
+                payload.pop(key, None)
+        return payload
+    payload = dict(kwargs)
+    for key in ("cache_position", "sliding_window", "attention_mask"):
+        if key in payload and not _generate_accepts_kwarg(model, key):
+            payload.pop(key, None)
+    return payload
+
+
+def _generate_has_named_kwarg(model: Any, name: str) -> bool:
+    try:
+        signature = inspect.signature(model.generate)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return name in signature.parameters
+
+
+def _generate_accepts_kwarg(model: Any, name: str) -> bool:
+    try:
+        signature = inspect.signature(model.generate)
+    except (TypeError, ValueError, AttributeError):
+        return True
+    return name in signature.parameters or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
+
+def _generate_accepts_var_kwargs(model: Any) -> bool:
+    try:
+        signature = inspect.signature(model.generate)
+    except (TypeError, ValueError, AttributeError):
+        return True
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
 
 
 def _get_logits(outputs):

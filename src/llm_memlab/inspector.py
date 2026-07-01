@@ -66,14 +66,17 @@ class ModelArchitectureInfo:
 
 
 def inspect_model(model: Any, *, max_seq_len: int | None = None, batch_size: int = 1) -> ModelArchitectureInfo:
-    config = getattr(model, "config", None)
+    raw_config = getattr(model, "config", None)
+    config = _language_config(raw_config)
     params = list(model.parameters()) if hasattr(model, "parameters") else []
     param_count = sum(param.numel() for param in params)
     trainable_count = sum(param.numel() for param in params if getattr(param, "requires_grad", False))
     param_bytes = sum(param.numel() * param.element_size() for param in params)
     dtypes = tuple(sorted({str(param.dtype).replace("torch.", "") for param in params}))
     devices = tuple(sorted({str(param.device) for param in params}))
-    _, patch_report = optimize_hf_model(model, dry_run=True)
+    patch_report = None
+    if hasattr(model, "named_modules"):
+        _, patch_report = optimize_hf_model(model, dry_run=True)
 
     hidden = _get_config_value(config, "hidden_size", "n_embd", "d_model")
     heads = _get_config_value(config, "num_attention_heads", "n_head", "num_heads")
@@ -93,10 +96,15 @@ def inspect_model(model: Any, *, max_seq_len: int | None = None, batch_size: int
         kv_int8 = vectors + scale_vectors * 2
 
     notes: list[str] = []
-    if not patch_report.attention_candidates:
+    attention_candidates = () if patch_report is None else tuple(patch_report.attention_candidates)
+    patched_norms = 0 if patch_report is None else patch_report.patched_norms
+    patched_mlps = 0 if patch_report is None else patch_report.patched_mlps
+    if not attention_candidates:
         notes.append("No Llama/Qwen-style attention candidates were detected by the conservative patcher.")
-    if config is None:
+    if raw_config is None:
         notes.append("Model has no `.config`; architecture fields were inferred from module/parameter structure only.")
+    elif config is not raw_config:
+        notes.append(f"Architecture fields were read from nested language config under {getattr(raw_config, 'model_type', 'multimodal')}.")
 
     return ModelArchitectureInfo(
         model_type=str(_get_config_value(config, "model_type") or model.__class__.__name__),
@@ -113,9 +121,9 @@ def inspect_model(model: Any, *, max_seq_len: int | None = None, batch_size: int
         parameter_bytes=param_bytes,
         dtype_summary=dtypes,
         device_summary=devices,
-        patchable_norms=patch_report.patched_norms,
-        patchable_mlps=patch_report.patched_mlps,
-        attention_candidates=tuple(patch_report.attention_candidates),
+        patchable_norms=patched_norms,
+        patchable_mlps=patched_mlps,
+        attention_candidates=attention_candidates,
         kv_cache_bytes_fp16=kv_fp16,
         kv_cache_bytes_int8=kv_int8,
         notes=tuple(notes),
@@ -148,6 +156,18 @@ def _get_config_value(config: Any, *names: str):
         if isinstance(config, dict) and name in config:
             return config[name]
     return None
+
+
+def _language_config(config: Any):
+    if config is None:
+        return None
+    for name in ("text_config", "language_config", "llm_config"):
+        nested = getattr(config, name, None)
+        if nested is not None:
+            return nested
+        if isinstance(config, dict) and config.get(name) is not None:
+            return config[name]
+    return config
 
 
 def _resolve_torch_dtype(torch, dtype: str | None):
