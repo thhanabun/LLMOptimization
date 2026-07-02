@@ -30,12 +30,25 @@ Check the runtime:
 !python -m llm_memlab estimate --preset 7b-like --seq 2048 --batch 1 --training inference
 ```
 
-Run the portable smoke script. It works without a model and unlocks HF benchmarks when `LLM_MEMLAB_MODEL` points to a local model folder:
+Download a model from Hugging Face into the runtime and point `LLM_MEMLAB_MODEL` at the local folder. The default model is intentionally tiny so the cell is fast and cheap; replace `HF_MODEL_ID` with a larger model when the runtime can handle it.
 
 ```python
 import os
+from huggingface_hub import snapshot_download
+
 os.environ.setdefault("LLM_MEMLAB_MODEL_ROOT", "/content/hf_models")
-# os.environ["LLM_MEMLAB_MODEL"] = "/content/hf_models/TinyLlama-1.1B-Chat-v1.0"
+HF_MODEL_ID = os.environ.get("HF_MODEL_ID", "hf-internal-testing/tiny-random-LlamaForCausalLM")
+model_path = snapshot_download(
+    repo_id=HF_MODEL_ID,
+    local_dir=os.path.join(os.environ["LLM_MEMLAB_MODEL_ROOT"], HF_MODEL_ID.replace("/", "__")),
+    token=os.environ.get("HF_TOKEN"),
+)
+os.environ["LLM_MEMLAB_MODEL"] = model_path
+```
+
+Run the portable smoke script:
+
+```python
 !python examples/cloud_smoke.py --tokens 1
 ```
 
@@ -53,22 +66,35 @@ Notes:
 !python -m pip install -e .[torch,transformers]
 ```
 
-Kaggle datasets are commonly mounted under `/kaggle/input`. Use an environment variable instead of hardcoding model paths:
+Kaggle datasets are commonly mounted under `/kaggle/input`, but Hugging Face downloads should go to `/kaggle/working` because `/kaggle/input` is read-only:
 
 ```python
 import os
-os.environ["LLM_MEMLAB_MODEL_ROOT"] = "/kaggle/input/hf-models"
+os.environ["LLM_MEMLAB_MODEL_ROOT"] = "/kaggle/working/hf_models"
 ```
 
+Download a model from Hugging Face. For gated/private models, create a Kaggle secret named `HF_TOKEN` and uncomment the secret block:
+
 ```python
-!python -m llm_memlab local-model-harness --root "$LLM_MEMLAB_MODEL_ROOT" --json-out local_model_fixtures.json
+# from kaggle_secrets import UserSecretsClient
+# os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
+
+from huggingface_hub import snapshot_download
+
+HF_MODEL_ID = os.environ.get("HF_MODEL_ID", "hf-internal-testing/tiny-random-LlamaForCausalLM")
+model_path = snapshot_download(
+    repo_id=HF_MODEL_ID,
+    local_dir=os.path.join(os.environ["LLM_MEMLAB_MODEL_ROOT"], HF_MODEL_ID.replace("/", "__")),
+    token=os.environ.get("HF_TOKEN"),
+)
+os.environ["LLM_MEMLAB_MODEL"] = model_path
+```
+
+Then run the harness and smoke workflow:
+
+```python
+!python -m llm_memlab local-model-harness --root "$LLM_MEMLAB_MODEL_ROOT" --json-out /kaggle/working/local_model_fixtures.json
 !python -m llm_memlab backend-demo
-```
-
-If a compatible model folder exists:
-
-```python
-# os.environ["LLM_MEMLAB_MODEL"] = "/kaggle/input/hf-models/TinyLlama-1.1B-Chat-v1.0"
 !python examples/cloud_smoke.py --tokens 1
 ```
 

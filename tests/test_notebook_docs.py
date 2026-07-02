@@ -18,6 +18,8 @@ class NotebookDocsTests(unittest.TestCase):
             self.assertIn("examples/cloud_smoke.py", sources)
             self.assertIn("LLM_MEMLAB_MODEL_ROOT", sources)
             self.assertIn("cloud_dashboard.html", sources)
+            self.assertIn("snapshot_download", sources)
+            self.assertIn("HF_MODEL_ID", sources)
 
     def test_docs_cover_certification_vllm_and_api_reference(self):
         docs = {
@@ -31,7 +33,10 @@ class NotebookDocsTests(unittest.TestCase):
         self.assertIn("hf-cache-certify", docs["certify"].read_text(encoding="utf-8"))
         self.assertIn("serving-bench", docs["vllm"].read_text(encoding="utf-8"))
         self.assertIn("llm_memlab.production", docs["api"].read_text(encoding="utf-8"))
-        self.assertIn("notebooks/colab_quickstart.ipynb", docs["cloud"].read_text(encoding="utf-8"))
+        cloud = docs["cloud"].read_text(encoding="utf-8")
+        self.assertIn("notebooks/colab_quickstart.ipynb", cloud)
+        self.assertIn("snapshot_download", cloud)
+        self.assertIn("HF_MODEL_ID", cloud)
 
     def test_examples_prefer_env_model_paths(self):
         cloud_smoke = (ROOT / "examples" / "cloud_smoke.py").read_text(encoding="utf-8")
