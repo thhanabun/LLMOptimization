@@ -34,14 +34,14 @@ class BenchmarkDashboard:
             else ""
         )
         return f"""<!doctype html><html><head><meta charset='utf-8'><title>{_e(title)}</title>
-<style>body{{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#17202a}}table{{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:24px}}td,th{{border-bottom:1px solid #e5e9f0;padding:8px;text-align:left}}.bad{{color:#b42318}}.good{{color:#067647}}.muted{{color:#667085}}</style>
-</head><body><h1>{_e(title)}</h1><p>Schema: {_e(self.schema_version)}. Records: {len(self.records)}</p>
+<style>{_dashboard_css()}</style>
+</head><body><main><h1>{_e(title)}</h1><p class='meta'>Schema: {_e(self.schema_version)}. Records: {len(self.records)}</p>
 <h2>Per model/backend summary</h2><table><thead><tr><th>Group</th><th>Runs</th><th>Avg latency ms</th><th>Quality</th><th>Peak memory</th></tr></thead><tbody>{summary_rows}</tbody></table>
 {serving_section}
 <h2>Trend overview</h2><table><thead><tr><th>Group</th><th>Runs</th><th>Latency trend</th><th>Quality drift trend</th><th>Memory peak trend</th><th>GPU</th><th>Backend</th><th>Commit range</th></tr></thead><tbody>{trend_rows}</tbody></table>
 <h2>Regression hints</h2><table><thead><tr><th>Group</th><th>Latency</th><th>Quality</th><th>Memory</th><th>Status</th></tr></thead><tbody>{regression_rows}</tbody></table>
 <h2>Run history</h2><table><thead><tr><th>Name</th><th>Kind</th><th>Latency ms</th><th>First token ms</th><th>Tok/s</th><th>Peak</th><th>Quality</th><th>Mean abs</th><th>GPU</th><th>Backend</th><th>Commit</th></tr></thead><tbody>{rows}</tbody></table>
-</body></html>"""
+</main></body></html>"""
 
 
 def benchmark_dashboard_from_files(paths: list[str | Path] | tuple[str | Path, ...]) -> BenchmarkDashboard:
@@ -58,6 +58,50 @@ def write_benchmark_dashboard_html(
     path = Path(output)
     path.write_text(dashboard.to_html(title=title), encoding="utf-8")
     return path
+
+
+def _dashboard_css() -> str:
+    return """
+:root { color-scheme: light; }
+html { background: #f1f5f9; }
+body {
+  background: #f1f5f9;
+  color: #17202a;
+  font-family: Segoe UI, Arial, sans-serif;
+  margin: 0;
+  padding: 24px;
+}
+main {
+  background: #ffffff;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  max-width: 1280px;
+  padding: 24px;
+}
+h1, h2 { color: #111827; }
+.meta { color: #475467; }
+table {
+  background: #ffffff;
+  border-collapse: collapse;
+  color: #17202a;
+  font-size: 13px;
+  margin-bottom: 24px;
+  width: 100%;
+}
+thead { background: #eaf0f7; }
+tbody tr:nth-child(even) { background: #f8fafc; }
+td, th {
+  border-bottom: 1px solid #d7dee8;
+  padding: 8px 10px;
+  text-align: left;
+}
+th { color: #344054; font-weight: 700; }
+td { color: #17202a; }
+.bad { color: #b42318; font-weight: 700; }
+.good { color: #067647; font-weight: 700; }
+.muted { color: #667085; }
+""".strip()
 
 
 def _record_row(record: BenchmarkRecord) -> str:

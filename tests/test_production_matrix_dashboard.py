@@ -185,6 +185,8 @@ class ProductionMatrixDashboardTests(unittest.TestCase):
             self.assertIn("Memory peak trend", html)
             self.assertIn("unit-test-gpu", html)
             self.assertIn("triton", html)
+            self.assertIn("color-scheme: light", html)
+            self.assertIn("background: #f1f5f9", html)
 
     def test_kernel_promotion_rejects_small_smoke_matrix_by_default(self):
         report = KernelCertificationReport(
