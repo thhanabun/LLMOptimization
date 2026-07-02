@@ -1,6 +1,6 @@
 # llm-memlab
 
-Current release target: `v0.1.0`.
+Current release target: `v0.1.1`.
 
 `llm-memlab` is a memory-first LLM architecture prototype:
 
@@ -15,13 +15,13 @@ backends or Triton kernels later.
 
 ## Release Status
 
-Stable in `0.1.0`:
+Stable in `0.1.1`:
 
 - Memory estimation, tensor lifetime planning, PyTorch/HF inspection, debugger reports, benchmark storage, quality gates, and conservative HF fallback workflows.
 - `llm_memlab.production` as the stable public API surface for the current 0.x line.
 - Backend detection and policy explanations for Torch, CUDA, Triton, CuTile contract, optional plugins, and `vllm-serving`.
 
-Experimental in `0.1.0`:
+Experimental in `0.1.1`:
 
 - Triton fused/paged decode kernels, quantized direct cache paths, CuTile runtime execution, and direct vLLM serving execution.
 - Experimental paths require local certification on the target model, GPU, dtype, sequence length, and backend before production promotion.
@@ -56,6 +56,9 @@ python -m llm_memlab kernel-demo --device cuda --repeats 3
 - [Production Checklist](docs/production_checklist.md)
 - [Release Checklist](docs/release_checklist.md)
 - [Cloud Notebook Examples](docs/cloud_notebooks.md)
+- [How To Certify Your Model](docs/certify_your_model.md)
+- [How To Compare With vLLM](docs/compare_with_vllm.md)
+- [API Reference](docs/api_reference.md)
 - [How To Integrate In CI](docs/ci_integration.md)
 - [HF Adapter Limitations](docs/hf_adapter_limitations.md)
 - [Kernel Policy Decision Table](docs/kernel_policy_decision_table.md)
@@ -63,6 +66,11 @@ python -m llm_memlab kernel-demo --device cuda --repeats 3
 - [Deprecation And Versioning Policy](docs/versioning.md)
 
 Use `llm_memlab.production` for stable APIs and `llm_memlab.experimental` only for opt-in certified kernel paths.
+
+Notebook starters:
+
+- [Colab quickstart](notebooks/colab_quickstart.ipynb)
+- [Kaggle quickstart](notebooks/kaggle_quickstart.ipynb)
 ### Production Notes
 
 For production-oriented use, keep the stable path conservative:

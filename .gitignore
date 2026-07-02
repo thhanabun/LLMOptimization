@@ -33,3 +33,4 @@ local_model_fixtures.json
 local_models_report.json
 local_cert_matrix.json
 profiles_local.json
+llm_memlab_outputs/

@@ -8,7 +8,7 @@ def model_root() -> Path:
     configured = os.environ.get("LLM_MEMLAB_MODEL_ROOT")
     if configured:
         return Path(configured)
-    return Path(r"D:\hf_models" if os.name == "nt" else "./models")
+    return Path("./models")
 
 
 if __name__ == "__main__":

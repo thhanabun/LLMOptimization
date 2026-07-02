@@ -1,6 +1,6 @@
 """Memory-first LLM analysis toolkit."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .attention_debugger import AttentionStats, analyze_qk_attention, attention_stats_to_text, collect_attention_stats
 from .backend_registry import BackendInfo, BackendPlugin, BackendRegistry, default_backend_registry, load_backend_entrypoints

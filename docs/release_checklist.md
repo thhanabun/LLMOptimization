@@ -16,7 +16,7 @@ python -m build
 
 ```powershell
 python -m venv .wheel-smoke
-.\.wheel-smoke\Scripts\python.exe -m pip install --no-deps dist\llm_memlab-0.1.0-py3-none-any.whl
+.\.wheel-smoke\Scripts\python.exe -m pip install --no-deps dist\llm_memlab-0.1.1-py3-none-any.whl
 .\.wheel-smoke\Scripts\python.exe -c "import llm_memlab; print(llm_memlab.__version__)"
 .\.wheel-smoke\Scripts\llm-memlab.exe backend-demo
 ```
@@ -35,9 +35,9 @@ python -m llm_memlab serving-bench --model D:\hf_models\TinyLlama-1.1B-Chat-v1.0
 
 ```powershell
 git status --short
-git tag -a v0.1.0 -m "llm-memlab v0.1.0"
+git tag -a v0.1.1 -m "llm-memlab v0.1.1"
 git push origin main
-git push origin v0.1.0
+git push origin v0.1.1
 ```
 
-Create a GitHub release from `docs/release_notes_v0.1.0.md`.
+Create a GitHub release from the matching release notes file.

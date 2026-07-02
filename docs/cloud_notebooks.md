@@ -2,6 +2,19 @@
 
 These examples are intentionally conservative. Notebook platforms change often, so treat this page as a portable starter recipe and validate the runtime with `backend-demo` before trusting GPU paths.
 
+## Ready-To-Run Notebooks
+
+- [Colab quickstart notebook](../notebooks/colab_quickstart.ipynb)
+- [Kaggle quickstart notebook](../notebooks/kaggle_quickstart.ipynb)
+
+Both notebooks call `examples/cloud_smoke.py`, which runs:
+
+- `backend-demo`
+- `estimate`
+- optional `memory-first-hf-bench`
+- optional `serving-bench`
+- HTML dashboard export
+
 ## Google Colab
 
 ```python
@@ -17,11 +30,13 @@ Check the runtime:
 !python -m llm_memlab estimate --preset 7b-like --seq 2048 --batch 1 --training inference
 ```
 
-Run a small memory-first HF smoke if you have a local or downloaded model:
+Run the portable smoke script. It works without a model and unlocks HF benchmarks when `LLM_MEMLAB_MODEL` points to a local model folder:
 
 ```python
-MODEL = "/content/hf_models/TinyLlama-1.1B-Chat-v1.0"
-!python -m llm_memlab serving-bench --model "$MODEL" --local-files-only --prompt hello --tokens 1 --device auto --dtype auto --cache paged --json-out serving_bench.json --csv-out serving_bench.csv --html-out serving_dashboard.html
+import os
+os.environ.setdefault("LLM_MEMLAB_MODEL_ROOT", "/content/hf_models")
+# os.environ["LLM_MEMLAB_MODEL"] = "/content/hf_models/TinyLlama-1.1B-Chat-v1.0"
+!python examples/cloud_smoke.py --tokens 1
 ```
 
 Notes:
@@ -53,8 +68,8 @@ os.environ["LLM_MEMLAB_MODEL_ROOT"] = "/kaggle/input/hf-models"
 If a compatible model folder exists:
 
 ```python
-MODEL = "/kaggle/input/hf-models/TinyLlama-1.1B-Chat-v1.0"
-!python -m llm_memlab memory-first-hf-bench --model "$MODEL" --local-files-only --tokens 1 --device auto --dtype auto --cache paged --json-out tiny_bench.json --csv-out tiny_bench.csv
+# os.environ["LLM_MEMLAB_MODEL"] = "/kaggle/input/hf-models/TinyLlama-1.1B-Chat-v1.0"
+!python examples/cloud_smoke.py --tokens 1
 ```
 
 Notes:

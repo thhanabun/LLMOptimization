@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.1 - Unreleased
+
+Documentation, notebook, and portability polish for the first patch release.
+
+### Added
+
+- Real Colab and Kaggle notebook starters under `notebooks/`.
+- `examples/cloud_smoke.py`, a portable platform smoke script for backend detection, memory estimates, optional HF model benchmarks, serving benchmark export, and dashboard generation.
+- Docs for certifying local models, comparing against vLLM, and the stable public API surface.
+
+### Changed
+
+- README release status now targets `v0.1.1`.
+- Cloud notebook docs now point to runnable notebooks and the shared cloud smoke script.
+- Examples prefer `LLM_MEMLAB_MODEL` and `LLM_MEMLAB_MODEL_ROOT` instead of hardcoded local paths.
+
 ## 0.1.0 - 2026-07-01
 
 Initial public release of `llm-memlab`, a memory-first LLM analysis, debugging, certification, and optimization lab.
